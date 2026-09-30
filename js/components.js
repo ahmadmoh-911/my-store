@@ -3,7 +3,7 @@
  * the success celebration and empty/loading states.
  */
 import { icon } from './icons.js';
-import { el, fromHTML, clear, escapeHTML, wait } from './utils.js';
+import { el, fromHTML, clear, escapeHTML, wait, fmtDate, fmtTime, numInt, moneyHTML } from './utils.js';
 
 /* ------------------------------------------------------------------ *
  * Toasts
@@ -443,4 +443,70 @@ export function mountList(host, { isEmpty, empty, make }) {
   clear(host);
   if (isEmpty) host.appendChild(empty);
   else host.appendChild(make());
+}
+
+/* ------------------------------------------------------------------ *
+ * Invoice row — one sale, one card, one field per line
+ * ------------------------------------------------------------------ */
+
+const SALE_PAYMENTS = {
+  cash: { label: 'نقداً', icon: 'cash' },
+  card: { label: 'بطاقة', icon: 'card' },
+  transfer: { label: 'تحويل', icon: 'transfer' },
+};
+
+/**
+ * A sale rendered as a card instead of a single run-on line.
+ *
+ * The old `.inv-row` read as `20261001-01213 صنف1 أكتوبر 2026 — 7:32 م1,810ILS`:
+ * four different values with no separation, no payment method, and — because
+ * `fmtDate(d, true)` already ends in the time — a second copy of the clock when
+ * a caller appended `fmtTime()`. Every field gets its own row here, and the
+ * payment method is shown at all, so the row can be scanned instead of decoded.
+ *
+ * `onOpen` is optional: without it the row is still fully readable, it is just
+ * not a button.
+ */
+export function saleRow(sale, currency, onOpen) {
+  const items = sale.items || [];
+  const units = items.reduce((t, it) => t + (Number(it.qty) || 0), 0);
+  const pay = SALE_PAYMENTS[sale.paymentMethod] || SALE_PAYMENTS.cash;
+  const when = new Date(sale.timestamp);
+
+  const node = el(
+    onOpen ? 'button.inv-card' : 'div.inv-card',
+    onOpen
+      ? { type: 'button', onClick: () => onOpen(sale) }
+      : {},
+    /* line 1 — who and when */
+    el(
+      'div.inv-card__head',
+      {},
+      el('span.inv-card__no', { text: sale.receiptNo || 'فاتورة' }),
+      el(
+        'span.inv-card__when',
+        {},
+        el('span.inv-card__date', { text: fmtDate(when) }),
+        // the clock is its own field: fmtDate(when, true) would repeat it here
+        el('span.inv-card__time', { text: fmtTime(when) })
+      )
+    ),
+
+    /* line 2 — what was in it */
+    el(
+      'div.inv-card__lines',
+      {},
+      el('span', { text: `${items.length} صنف` }),
+      el('span.inv-card__sep', { text: '·' }),
+      el('span', { text: `${numInt(units)} قطعة` })
+    ),
+
+    /* line 3 — how it was paid */
+    el('span.inv-card__pay', {}, fromHTML(icon(pay.icon)), el('span', { text: pay.label })),
+
+    /* line 4 — the money, on its own so the number is never buried */
+    el('span.inv-card__sum', { html: moneyHTML(sale.total, currency) })
+  );
+
+  return node;
 }

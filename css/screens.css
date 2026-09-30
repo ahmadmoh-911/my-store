@@ -106,6 +106,28 @@
 .quick__ico svg { width: 19px; height: 19px; }
 .quick--brass .quick__ico { background: var(--brass-tint); color: var(--brass-deep); }
 .quick--emerald .quick__ico { background: var(--emerald-tint); color: var(--emerald); }
+.quick--info .quick__ico { background: var(--info-tint); color: var(--info); }
+
+/* A tinted wash, not just a coloured icon: with three of five actions carrying
+   no tone at all, the row read as five identical grey slabs directly under four
+   grey .stat tiles — nine cards in one undifferentiated block. Each tone now
+   tints the card itself and pairs it with a matching border. */
+.quick--primary {
+  background: linear-gradient(var(--primary-tint), var(--primary-tint)), var(--card);
+  border-color: var(--line-strong);
+}
+.quick--brass {
+  background: linear-gradient(var(--brass-tint), var(--brass-tint)), var(--card);
+  border-color: var(--brass-line);
+}
+.quick--emerald {
+  background: linear-gradient(var(--emerald-tint), var(--emerald-tint)), var(--card);
+  border-color: rgba(52, 211, 153, 0.22);
+}
+.quick--info {
+  background: linear-gradient(var(--info-tint), var(--info-tint)), var(--card);
+  border-color: rgba(110, 168, 254, 0.22);
+}
 .quick:hover { transform: translateY(-3px); box-shadow: var(--shadow-2); }
 .quick:hover .quick__ico { transform: rotate(-6deg) scale(1.06); }
 .quick:active { transform: scale(0.96); }

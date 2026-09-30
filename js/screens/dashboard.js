@@ -10,7 +10,7 @@ import {
   pctChange, dailySeries, hourlySeries, bestSellers, lowStockProducts, discountGiven,
 } from '../analytics.js';
 import { lineChart, destroyCharts } from '../charts.js';
-import { emptyState, loadingRow, openSheet, toast } from '../components.js';
+import { emptyState, loadingRow, openSheet, toast, saleRow } from '../components.js';
 import { openInvoiceSheet } from '../invoice-sheet.js';
 import { openStockSheet } from '../stock-sheet.js';
 import { navigate } from '../router.js';
@@ -222,6 +222,8 @@ function renderStats(root, sales, products, settings) {
       money: true,
       icon: 'trendingUp',
       tone: '',
+      // the badge carries the number only; "عن اليوم السابق" is its own line
+      // underneath, so a caption is never welded to a figure
       foot:
         change === null
           ? el('span.delta.delta--flat', { text: 'أول يوم' })
@@ -229,9 +231,9 @@ function renderStats(root, sales, products, settings) {
               `span.delta.delta--${change >= 0 ? 'up' : 'down'}`,
               {},
               fromHTML(icon(change >= 0 ? 'trendingUp' : 'trendingDown')),
-              el('span', { text: `${change >= 0 ? '+' : ''}${change.toFixed(1)}%` }),
-              el('span', { style: 'font-weight:500;opacity:.8', text: 'عن اليوم السابق' })
+              el('span', { text: `${change >= 0 ? '+' : ''}${change.toFixed(1)}%` })
             ),
+      note: 'عن اليوم السابق',
       extra: `${orderCount(daySales)} عملية بيع`,
       onClick: () => openDayInvoices(daySales, day, cur, refresh),
     },
@@ -248,6 +250,7 @@ function renderStats(root, sales, products, settings) {
     {
       label: 'تنبيهات النواقص',
       value: lowList.length,
+      unit: 'منتج',
       icon: 'alert',
       tone: 'danger',
       pulse: lowList.length > 0,
@@ -260,9 +263,10 @@ function renderStats(root, sales, products, settings) {
     {
       label: 'إجمالي المخزون',
       value: stockQty,
+      unit: 'قطعة',
       icon: 'package',
       tone: 'emerald',
-      foot: el('span', { text: `قطعة في ${products.length} منتج` }),
+      foot: el('span', { text: `${products.length} منتج` }),
       extra: `${products.filter((p) => stockOf(p) === 0).length} نفدت`,
       onClick: () => openStockSheet({ products, onChanged: refresh }),
     },
@@ -289,14 +293,27 @@ function renderStats(root, sales, products, settings) {
         el('div.stat__label', { text: c.label })
       )
     );
+    // The unit belongs to the figure it measures, so it sits inside the value
+    // field next to the number — not in the footer, where two other lines would
+    // separate "584" from "قطعة" and make it read as a sentence of its own.
+    // `unit` names a plain count; `money` falls back to the shop's currency.
+    const unit = c.unit || (c.money ? cur : '');
     node.appendChild(
-      el('div.stat__value', {}, el('span', { 'data-count': String(c.value), text: '0' }), c.money ? el('small', { text: cur }) : null)
+      el('div.stat__value', {}, el('span', { 'data-count': String(c.value), text: '0' }), unit ? el('small', { text: unit }) : null)
     );
-    // `html`, not `text:` for extra: the "متوسط السلة" card builds it with
-    // moneyHTML(), so text: printed the currency chip's markup literally.
-    // All four `extra` values are app-generated (counts and money), never user
-    // input, so innerHTML is safe here.
-    node.appendChild(el('div.stat__foot', {}, c.foot, c.extra ? el('span', { style: 'margin-inline-start:auto;opacity:.75', html: c.extra }) : null));
+    // One line per field: the primary badge, then its caption, then the
+    // secondary figure. `html` on extra because "متوسط السلة" is built with
+    // moneyHTML(); every value here is app-generated (counts and money), never
+    // user input.
+    node.appendChild(
+      el(
+        'div.stat__foot',
+        {},
+        c.foot,
+        c.note ? el('span.stat__note', { text: c.note }) : null,
+        c.extra ? el('span.stat__extra', { html: c.extra }) : null
+      )
+    );
     if (c.onClick) node.classList.add('stat--tap');
     host.appendChild(node);
     const target = node.querySelector('[data-count]');
@@ -356,19 +373,13 @@ function renderDayInvoices(root, sales, settings) {
   }
 }
 
+/**
+ * One day-invoice. Delegates to the shared components.saleRow() so the Dashboard
+ * and Reports present a sale identically — and so the row has one field per
+ * line instead of the four-values-on-one-line `.inv-row` it replaced.
+ */
 function invoiceRow(sale, cur, refresh) {
-  return el(
-    'button.inv-row',
-    { type: 'button', onClick: () => openInvoiceSheet(sale, { onChanged: refresh, onRefund: refresh }) },
-    el('span.inv-row__no', { text: sale.receiptNo || '—' }),
-    el(
-      'span.inv-row__meta',
-      {},
-      el('span', { text: `${(sale.items || []).length} صنف` }),
-      el('span.tiny.muted', { text: fmtDate(new Date(sale.timestamp), true) })
-    ),
-    el('span.inv-row__sum', { html: moneyHTML(sale.total, cur) })
-  );
+  return saleRow(sale, cur, (s) => openInvoiceSheet(s, { onChanged: refresh, onRefund: refresh }));
 }
 
 /** Full list of a day's invoices in a sheet — opened from a stat tile. */
@@ -404,12 +415,14 @@ function renderQuick(root, products) {
     const r = document.getElementById('screen-dashboard');
     if (r && r.isConnected) boot(r);
   };
+  // Every action carries a tone. Three of the five had none, so the row read as
+  // five identical grey slabs directly under four grey stat tiles.
   const actions = [
-    { label: 'بيع جديد', icon: 'cart', to: 'pos', cls: '', onClick: null },
+    { label: 'بيع جديد', icon: 'cart', to: 'pos', cls: 'quick--primary', onClick: null },
     { label: 'رفع المخزون', icon: 'package', to: null, cls: 'quick--emerald', onClick: () => openStockSheet({ products, onChanged: refresh }) },
     { label: 'إضافة منتج', icon: 'plus', to: 'product/new', cls: 'quick--brass', onClick: null },
-    { label: 'مورد جديد', icon: 'truck', to: 'suppliers', cls: '', onClick: null },
-    { label: 'التقارير', icon: 'chart', to: 'reports', cls: '', onClick: null },
+    { label: 'مورد جديد', icon: 'truck', to: 'suppliers', cls: 'quick--info', onClick: null },
+    { label: 'التقارير', icon: 'chart', to: 'reports', cls: 'quick--primary', onClick: null },
   ];
   actions.forEach((a) =>
     host.appendChild(

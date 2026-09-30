@@ -311,35 +311,54 @@ function renderDetail(id) {
     } else {
       const wrap = el('div');
       mine.forEach((inv, i) => {
-        wrap.appendChild(
+        // The whole card opens the invoice. Previously the only way in was a
+        // 5px-padded "عرض" word inside a flex-shrink:0 corner, so on a phone the
+        // row looked tappable and did nothing when tapped — which is exactly
+        // how "the invoice section does not respond" reads. edit/delete keep
+        // their own buttons and stopPropagation so they do not double-fire.
+        const open = () => viewInvoice(inv, cur);
+        const row = el(
+          'div.row.row--tap.fade-up',
+          {
+            style: `animation-delay:${Math.min(i * 45, 300)}ms`,
+            role: 'button',
+            tabindex: '0',
+            'aria-label': inv.invoiceNo ? `عرض فاتورة ${inv.invoiceNo}` : 'عرض فاتورة شراء',
+            onClick: open,
+            onkeydown: (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                open();
+              }
+            },
+          },
           el(
-            'div.row.fade-up',
-            { style: `animation-delay:${Math.min(i * 45, 300)}ms` },
+            'div.row__main',
+            {},
+            el('div.row__title', { text: inv.invoiceNo ? `فاتورة ${inv.invoiceNo}` : 'فاتورة شراء' }),
+            el('div.row__sub', { text: `${fmtDate(inv.date, true)} · ${inv.items.length} صنف` }),
             el(
-              'div.row__main',
-              {},
-              el('div.row__title', { text: inv.invoiceNo ? `فاتورة ${inv.invoiceNo}` : 'فاتورة شراء' }),
-              el('div.row__sub', { text: `${fmtDate(inv.date, true)} · ${inv.items.length} صنف` }),
-              el(
-                'div',
-                { style: 'display:flex;gap:5px;flex-wrap:wrap;margin-top:6px' },
-                ...inv.items.slice(0, 3).map((it) => el('span.badge.badge--muted', { text: `${num(it.qty)}× ${it.name}` })),
-                inv.items.length > 3 ? el('span.badge.badge--muted', { text: `+${inv.items.length - 3}` }) : null
-              )
-            ),
+              'div',
+              { style: 'display:flex;gap:5px;flex-wrap:wrap;margin-top:6px' },
+              ...inv.items.slice(0, 3).map((it) => el('span.badge.badge--muted', { text: `${num(it.qty)}× ${it.name}` })),
+              inv.items.length > 3 ? el('span.badge.badge--muted', { text: `+${inv.items.length - 3}` }) : null
+            )
+          ),
+          el(
+            'div.row__end',
+            {},
+            el('div.row__price', { html: moneyHTML(inv.total, cur) }),
+            inv.discount > 0 ? el('span.tiny', { style: 'color:var(--success)', text: `خصم ${num(inv.discount)}` }) : null,
             el(
-              'div.row__end',
-              {},
-              el('div.row__price', { html: moneyHTML(inv.total, cur) }),
-              inv.discount > 0 ? el('span.tiny', { style: 'color:var(--success)', text: `خصم ${num(inv.discount)}` }) : null,
-              el('div', { style: 'display:flex;gap:4px' },
-                el('button.card-head__action', { type: 'button', text: 'عرض', onClick: () => viewInvoice(inv, cur) }),
-                el('button.card-head__action', { type: 'button', text: 'تعديل', onClick: () => openInvoiceEditor(s, inv, rebuild) }),
-                el('button.card-head__action', { type: 'button', text: 'حذف', onClick: () => removeInvoice(inv, rebuild) })
-              )
+              'div',
+              { style: 'display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end' },
+              el('button.card-head__action', { type: 'button', text: 'عرض', onClick: (e) => { e.stopPropagation(); open(); } }),
+              el('button.card-head__action', { type: 'button', text: 'تعديل', onClick: (e) => { e.stopPropagation(); openInvoiceEditor(s, inv, rebuild); } }),
+              el('button.card-head__action', { type: 'button', text: 'حذف', onClick: (e) => { e.stopPropagation(); removeInvoice(inv, rebuild); } })
             )
           )
         );
+        wrap.appendChild(row);
       });
       host.appendChild(wrap);
     }
@@ -372,7 +391,15 @@ function renderDetail(id) {
               'div.row__end',
               {},
               el('div.row__price', { html: moneyHTML(p.amount, cur) }),
-              el('button.card-head__action', { type: 'button', text: 'حذف', onClick: () => removePayment(p, rebuild) })
+              el(
+                'div',
+                { style: 'display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end' },
+                // openPaymentEditor() already accepts an existing payment and
+                // writes through createSupplierPayment({ id: pay?.id, ... }), so
+                // editing one needs no new code — only a way in.
+                el('button.card-head__action', { type: 'button', text: 'تعديل', onClick: () => openPaymentEditor(s, p, rebuild) }),
+                el('button.card-head__action', { type: 'button', text: 'حذف', onClick: () => removePayment(p, rebuild) })
+              )
             )
           )
         );
@@ -410,7 +437,7 @@ function miniStat(label, html) {
  * ------------------------------------------------------------------ */
 
 function viewInvoice(inv, cur) {
-  openModal({
+  const m = openModal({
     title: inv.invoiceNo ? `فاتورة ${inv.invoiceNo}` : 'فاتورة شراء',
     body: el(
       'div',
@@ -432,7 +459,11 @@ function viewInvoice(inv, cur) {
       el('div.totals__grand', {}, el('span', { style: 'font-weight:700', text: 'الإجمالي' }), el('span.amount', { html: moneyHTML(inv.total, cur) }))
     ),
     onClose: () => {},
+    // a full-width close target: the header ✕ alone is a 20px tap on a phone,
+    // and this modal can grow past the screen with a long invoice
+    foot: [el('button.btn.btn--primary', { type: 'button', text: 'إغلاق', onClick: () => m.close() })],
   });
+  return m;
 }
 
 async function removeInvoice(inv, rebuild) {

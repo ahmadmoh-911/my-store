@@ -101,7 +101,13 @@ export function render(params = []) {
   const stopWatching = subscribe(repaintPos);
 
   paintProducts(root);
-  repaintPos();
+  // The router only appends the screen to #view *after* render() returns, so
+  // #pos-cart is not in the document yet and repaintPos() would bail on its
+  // `if (!host) return` guard. Calling it here meant every visit to POS painted
+  // an empty cart column and a "سلة فارغة" badge even when the shared cart held
+  // lines — the sticky bar was right and this column was wrong. One frame later
+  // the screen is mounted, so repaint now.
+  requestAnimationFrame(repaintPos);
   activeScreens.push(stopWatching);
 
   // pre-select a product when arriving from a product card

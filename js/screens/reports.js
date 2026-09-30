@@ -9,7 +9,7 @@ import { icon } from '../icons.js';
 import { printPage } from '../native.js';
 import {
   el, fromHTML, clear, moneyHTML, num, numInt, isoDate, dayKeyOf, startOfDay, endOfDay,
-  addDays, fmtDate, fmtTime, downloadText, toCSV, wait,
+  addDays, fmtDate, downloadText, toCSV, wait,
 } from '../utils.js';
 import { listProducts, listSales, getSettings } from '../db.js';
 import {
@@ -17,7 +17,7 @@ import {
   bestSellers, categoryTotals, paymentBreakdown,
 } from '../analytics.js';
 import { barChart, doughnutChart, destroyCharts } from '../charts.js';
-import { pageHead, emptyState, sectionTitle, toast } from '../components.js';
+import { pageHead, emptyState, sectionTitle, toast, saleRow } from '../components.js';
 import { openInvoiceSheet } from '../invoice-sheet.js';
 import { navigate } from '../router.js';
 
@@ -33,7 +33,16 @@ const PRESETS = [
   { id: 'custom', label: 'مخصص' },
 ];
 
-let range = { preset: '7', from: null, to: null };
+let range = { preset: 'today', from: null, to: null };
+
+/**
+ * The invoice list is the screen's job; the charts are the extra. Reports used
+ * to open on "آخر ٧ أيام" and bury the invoices under four chart cards, so an
+ * owner looking for today's sales had to scroll past a trend graph, two
+ * doughnuts and a best-sellers ranking to find them. The range now opens on
+ * today, the invoices come first, and the analysis sits behind one tap.
+ */
+let showAnalysis = false;
 
 export function render() {
   const root = el('div.screen', { id: 'screen-reports' });
@@ -41,7 +50,7 @@ export function render() {
   root.appendChild(
     pageHead({
       title: 'التقارير',
-      sub: 'أداء المبيعات والأرباح خلال فترة محددة',
+      sub: 'فواتير المبيعات وأداءها خلال فترة محددة',
       actions: [
         el('button.btn.btn--soft', { type: 'button', onClick: () => exportCSV() }, fromHTML(icon('download')), el('span', { text: 'CSV' })),
         el('button.btn.btn--primary', { type: 'button', onClick: () => exportPDF() }, fromHTML(icon('printer')), el('span', { text: 'PDF' })),
@@ -50,7 +59,7 @@ export function render() {
   );
 
   const now = new Date();
-  range.from = startOfDay(addDays(now, -6));
+  range.from = startOfDay(now);
   range.to = endOfDay(now);
 
   root.appendChild(
@@ -223,22 +232,98 @@ async function paint(screenRoot) {
 
   clear(body);
 
-  if (!sales.length) {
-    body.appendChild(
+  /* --- sales / invoice history — the screen's reason for existing ------ */
+  // Reports is where an owner looks for "where are my invoices", so the list
+  // comes FIRST and reads the same `sales` already filtered to the selected
+  // range. It opens the very same openInvoiceSheet() the Dashboard uses — no
+  // second invoice screen and no new storage: editing or refunding here goes
+  // through db.updateSale / db.refundSale exactly as before.
+  const history = sales.slice().sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+  const HISTORY_PAGE = 25;
+
+  const repaint = () => {
+    const r = document.getElementById('screen-reports');
+    if (r && r.isConnected) paint(r);
+  };
+
+  const historyCard = el(
+    'div.card.card--pad',
+    { id: 'report-history' },
+    el(
+      'div.card-head',
+      {},
+      fromHTML(icon('receipt')),
+      el('h3', { text: 'سجل الفواتير' }),
+      el('span.tiny.muted', { text: `${history.length} فاتورة` })
+    )
+  );
+
+  if (!history.length) {
+    historyCard.appendChild(
       emptyState({
-        iconName: 'chart',
-        title: 'لا توجد مبيعات في هذه الفترة',
-        text: 'جرّب توسيع نطاق التاريخ أو أجرِ بعض العمليات أولاً.',
+        iconName: 'receipt',
+        title: 'لا توجد فواتير في هذه الفترة',
+        text: 'جرّب توسيع نطاق التاريخ أو أجرِ عملية بيع من نقطة البيع.',
+        small: true,
         action: el('button.btn.btn--primary', { type: 'button', onClick: () => navigate('pos') }, fromHTML(icon('cart')), el('span', { text: 'فتح نقطة البيع' })),
       })
     );
-    return;
+  } else {
+    const historyList = el('div.inv-list');
+    for (const s of history.slice(0, HISTORY_PAGE)) historyList.appendChild(invoiceRow(s, cur, repaint));
+    historyCard.appendChild(historyList);
+
+    if (history.length > HISTORY_PAGE) {
+      let shown = HISTORY_PAGE;
+      historyCard.appendChild(
+        el('button.card-head__action.card-head__action--block', {
+          type: 'button',
+          text: `عرض المزيد (${history.length - shown} فاتورة)`,
+          onClick: (e) => {
+            shown = Math.min(shown + HISTORY_PAGE, history.length);
+            clear(historyList);
+            for (const s of history.slice(0, shown)) historyList.appendChild(invoiceRow(s, cur, repaint));
+            if (shown >= history.length) e.currentTarget.remove();
+            else e.currentTarget.textContent = `عرض المزيد (${history.length - shown} فاتورة)`;
+          },
+        })
+      );
+    }
   }
+  body.appendChild(historyCard);
+
+  /* --- everything else, behind one tap --------------------------------- */
+  const toggle = el('button.card-head__action.card-head__action--block', {
+    type: 'button',
+    text: showAnalysis ? 'إخفاء التحليلات' : 'عرض التحليلات البيانية',
+    onClick: () => {
+      showAnalysis = !showAnalysis;
+      const r = document.getElementById('screen-reports');
+      if (r && r.isConnected) paint(r);
+    },
+  });
+
+  body.appendChild(
+    el(
+      'div.card-head',
+      { style: 'margin-top:20px;margin-bottom:0' },
+      fromHTML(icon('chart')),
+      el('h3', { text: 'تحليلات الفترة' })
+    )
+  );
+  body.appendChild(el('div', { style: 'margin-top:10px' }, toggle));
+
+  if (!showAnalysis) return;
+
+  const analysis = el('div', { id: 'report-analysis' });
+  body.appendChild(analysis);
+
+  if (!sales.length) return;
 
   /* --- daily bar chart ---------------------------------------------- */
   const { labels, values, clipped, total: span } = dailyBuckets(sales);
 
-  body.appendChild(
+  analysis.appendChild(
     el(
       'div.card.chart-card',
       { style: 'margin-bottom:16px' },
@@ -288,38 +373,40 @@ async function paint(screenRoot) {
     );
   }
 
-  body.appendChild(cols);
+  if (cols.children.length) analysis.appendChild(cols);
 
   /* --- best sellers --------------------------------------------------- */
-  body.appendChild(
-    el(
-      'div.card.chart-card',
-      { style: 'margin-top:16px' },
-      el('div.card-head', {}, fromHTML(icon('star')), el('h3', { text: 'المنتجات الأكثر مبيعاً' })),
+  if (top.length) {
+    analysis.appendChild(
       el(
-        'div.rank-list',
-        {},
-        ...top.map((p, i) =>
-          el(
-            'div.rank',
-            { style: `animation-delay:${i * 55}ms` },
-            el('span.rank__n', { text: String(i + 1) }),
+        'div.card.chart-card',
+        { style: 'margin-top:16px' },
+        el('div.card-head', {}, fromHTML(icon('star')), el('h3', { text: 'المنتجات الأكثر مبيعاً' })),
+        el(
+          'div.rank-list',
+          {},
+          ...top.map((p, i) =>
             el(
-              'div.rank__main',
-              {},
-              el('div.rank__name', { text: p.name }),
-              el('div.bar.rank__bar', {}, el('i', { style: `width:${Math.max(7, (p.revenue / top[0].revenue) * 100)}%` }))
-            ),
-            el('div.rank__val', {}, el('span', { html: moneyHTML(p.revenue, cur) }), el('small', { text: `${p.qty} قطعة` }))
+              'div.rank',
+              { style: `animation-delay:${i * 55}ms` },
+              el('span.rank__n', { text: String(i + 1) }),
+              el(
+                'div.rank__main',
+                {},
+                el('div.rank__name', { text: p.name }),
+                el('div.bar.rank__bar', {}, el('i', { style: `width:${Math.max(7, (p.revenue / top[0].revenue) * 100)}%` }))
+              ),
+              el('div.rank__val', {}, el('span', { html: moneyHTML(p.revenue, cur) }), el('small', { text: `${p.qty} قطعة` }))
+            )
           )
         )
       )
-    )
-  );
+    );
+  }
 
   /* --- category ranking (when the doughnut is hidden) ------------------ */
   if (cats.length === 1) {
-    body.appendChild(
+    analysis.appendChild(
       el(
         'div.card.card--pad',
         { style: 'margin-top:16px' },
@@ -340,55 +427,6 @@ async function paint(screenRoot) {
       )
     );
   }
-
-  /* --- sales / invoice history --------------------------------------- */
-  // Reports is where an owner looks for "where are my invoices", so the list
-  // lives here rather than only on the Dashboard. It reads the same `sales`
-  // already filtered to the selected range, and opens the very same
-  // openInvoiceSheet() sheet the Dashboard uses — no second invoice screen and
-  // no new storage: editing or refunding here goes through db.updateSale /
-  // db.refundSale exactly as before.
-  const history = sales.slice().sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
-  const HISTORY_PAGE = 25;
-
-  const repaint = () => {
-    const r = document.getElementById('screen-reports');
-    if (r && r.isConnected) paint(r);
-  };
-
-  const historyCard = el(
-    'div.card.card--pad',
-    { id: 'report-history', style: 'margin-top:16px' },
-    el(
-      'div.card-head',
-      {},
-      fromHTML(icon('receipt')),
-      el('h3', { text: 'سجل الفواتير' }),
-      el('span.tiny.muted', { text: `${history.length} فاتورة` })
-    )
-  );
-
-  const historyList = el('div.inv-list');
-  for (const s of history.slice(0, HISTORY_PAGE)) historyList.appendChild(invoiceRow(s, cur, repaint));
-  historyCard.appendChild(historyList);
-
-  if (history.length > HISTORY_PAGE) {
-    let shown = HISTORY_PAGE;
-    historyCard.appendChild(
-      el('button.card-head__action.card-head__action--block', {
-        type: 'button',
-        text: `عرض المزيد (${history.length - shown} فاتورة)`,
-        onClick: (e) => {
-          shown = Math.min(shown + HISTORY_PAGE, history.length);
-          clear(historyList);
-          for (const s of history.slice(0, shown)) historyList.appendChild(invoiceRow(s, cur, repaint));
-          if (shown >= history.length) e.currentTarget.remove();
-          else e.currentTarget.textContent = `عرض المزيد (${history.length - shown} فاتورة)`;
-        },
-      })
-    );
-  }
-  body.appendChild(historyCard);
 
   /* --- draw ----------------------------------------------------------- */
   destroyCharts();
@@ -417,26 +455,17 @@ async function paint(screenRoot) {
  * ------------------------------------------------------------------ */
 
 /**
- * One sale in the history list. Uses the same `.inv-row` markup as the
- * Dashboard's day list so the existing stylesheet applies unchanged, and opens
- * the shared openInvoiceSheet() — which handles edit and refund via
+ * One sale in the history list. Delegates to the shared components.saleRow() so
+ * a sale reads identically here and on the Dashboard — one field per line — and
+ * opens the shared openInvoiceSheet(), which handles edit and refund via
  * db.updateSale / db.refundSale and calls `refresh` afterwards so the report
  * re-reads the corrected numbers.
+ *
+ * The previous row also printed the clock twice: `fmtDate(ts, true)` already
+ * ends in the time, and `fmtTime(ts)` was appended after a "·".
  */
 function invoiceRow(sale, cur, refresh) {
-  const items = sale.items || [];
-  return el(
-    'button.inv-row',
-    { type: 'button', onClick: () => openInvoiceSheet(sale, { onChanged: refresh, onRefund: refresh }) },
-    el('span.inv-row__no', { text: sale.receiptNo || '—' }),
-    el(
-      'span.inv-row__meta',
-      {},
-      el('span', { text: `${items.length} صنف` }),
-      el('span.tiny.muted', { text: `${fmtDate(new Date(sale.timestamp), true)} · ${fmtTime(new Date(sale.timestamp))}` })
-    ),
-    el('span.inv-row__sum', { html: moneyHTML(sale.total, cur) })
-  );
+  return saleRow(sale, cur, (s) => openInvoiceSheet(s, { onChanged: refresh, onRefund: refresh }));
 }
 
 /* ------------------------------------------------------------------ *

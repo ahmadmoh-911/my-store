@@ -47,6 +47,13 @@ export const ROUTES = [
  * at all on the device this app actually runs on. The bar is a flex row of
  * `flex: 1 1 0` items, so it absorbs the extra destination without any
  * layout change.
+ *
+ * Settings is deliberately NOT here. Six destinations left ~58px per item on a
+ * 360px phone, which is under the 48px comfortable touch target once the label
+ * is accounted for, and the bar carries the daily workflow only. Settings stays
+ * in SIDE_NAV for desktop and is one tap away on mobile from the two controls
+ * main.js already puts in the topbar (the store pill and the settings icon-btn),
+ * so nothing becomes unreachable.
  */
 export const BOTTOM_NAV = [
   { id: 'dashboard', label: 'الرئيسية', icon: 'dashboard', href: '#/dashboard' },
@@ -54,7 +61,6 @@ export const BOTTOM_NAV = [
   { id: 'pos', label: 'بيع جديد', icon: 'store', href: '#/pos', primary: true },
   { id: 'suppliers', label: 'الموردون', icon: 'truck', href: '#/suppliers' },
   { id: 'reports', label: 'التقارير', icon: 'chart', href: '#/reports' },
-  { id: 'settings', label: 'الإعدادات', icon: 'settings', href: '#/settings' },
 ];
 
 export const SIDE_NAV = [
