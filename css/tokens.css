@@ -1,0 +1,128 @@
+/* ==========================================================================
+   Design tokens — "Noir Atelier" (dark luxury control-room)
+   --------------------------------------------------------------------------
+   Deep obsidian tonal ramp with electric crimson optics.
+
+   Two rules drive the whole theme:
+     1. Depth comes from *tonal surface stepping*, not from drop shadows.
+        Surfaces climb #08080a → #101013 → #141418 → #1b1b21, each separated by
+        a 1px hairline instead of a blur.
+     2. Light is rationed. Crimson is the only saturated colour on screen and it
+        is spent exclusively on the primary action, live telemetry and alerts —
+        which is why --shadow-glow exists: the accent is emitted, not painted.
+   ========================================================================== */
+
+:root {
+  /* Tells the engine to render native UI dark too: scrollbars, text selection,
+     date pickers, the select dropdown popup. Without this the app is a dark room
+     with a bright white scrollbar in it. The print block flips this back. */
+  color-scheme: dark;
+
+  /* --- surfaces (tonal ramp) -------------------------------------------- */
+  --surface: #08080a;          /* canvas — deepest void, absorbs glare        */
+  --surface-dim: #101013;      /* layer 1 — sidebars, wells, input fields     */
+  --surface-hi: #141418;       /* layer 2 — resting cards and tiles           */
+  --surface-2: #1b1b21;        /* layer 3 — sheets, popovers, action bars     */
+  --surface-3: #222228;        /* layer 4 — the rare floating top             */
+  --card: #141418;             /* raised card substrate                       */
+  --card-2: #1b1b21;           /* hover / secondary card                      */
+  --overlay: rgba(0, 0, 0, 0.72);
+
+  /* --- ink -------------------------------------------------------------- */
+  --ink: #f5f5f7;              /* headers, titles, dominant figures           */
+  --ink-2: #b4b4bd;            /* metadata, labels, nav items                */
+  --ink-3: #7a7a86;            /* captions, timestamps, placeholders         */
+  --ink-on-primary: #ffffff;
+
+  /* --- brand ------------------------------------------------------------ */
+  --primary: #ff1f3d;          /* electric crimson — the one loud colour     */
+  --primary-deep: #c4001f;     /* pressed                                    */
+  --primary-tint: rgba(255, 31, 61, 0.14);   /* selected rows, badge fills  */
+  --primary-fixed: #ffffff;    /* reserved for VIP / high-value markers      */
+
+  --brass: #f2be6c;            /* warm gold — luxury accent, VIP tiers       */
+  --brass-deep: #c98f3a;
+  --brass-tint: rgba(242, 190, 108, 0.14);
+  --brass-line: rgba(242, 190, 108, 0.22);
+
+  --emerald: #34d399;          /* settled / paid / in credit                 */
+  --emerald-tint: rgba(52, 211, 153, 0.14);
+
+  /* --- status ----------------------------------------------------------- */
+  --danger: #ff3b5c;
+  --danger-tint: rgba(255, 59, 92, 0.14);
+  --success: #34d399;
+  --success-tint: rgba(52, 211, 153, 0.14);
+  --warning: #f2be6c;
+  --warning-tint: rgba(242, 190, 108, 0.14);
+  --info: #6ea8fe;
+  --info-tint: rgba(110, 168, 254, 0.14);
+
+  /* --- lines & depth ---------------------------------------------------- */
+  /* 1px hairlines, never grey rules. They warm up to crimson on focus. */
+  --line: rgba(255, 255, 255, 0.06);
+  --line-soft: rgba(255, 255, 255, 0.04);
+  --line-strong: rgba(255, 31, 61, 0.28);
+
+  /* Shadows stay near-black and tight — they seat a layer, they do not float
+     it. The perceived depth is the tonal step; this only kills the seam. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 16px -6px rgba(0, 0, 0, 0.55);
+  --shadow-3: 0 16px 36px -12px rgba(0, 0, 0, 0.7);
+
+  /* Radiance — the accent projecting energy against the dark surfaces. */
+  --shadow-glow: 0 0 24px rgba(255, 31, 61, 0.35);
+  --shadow-glow-sm: 0 0 14px rgba(255, 31, 61, 0.22);
+  --shadow-brass: 0 0 18px rgba(242, 190, 108, 0.3);
+  --shadow-vip: 0 0 16px rgba(255, 255, 255, 0.18);
+
+  /* --- radii (soft, per spec: 12–16px on cards & buttons) ---------------- */
+  --r-xs: 4px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 24px;
+  --r-pill: 999px;
+
+  /* --- typography ------------------------------------------------------- */
+  --font: 'IBM Plex Sans Arabic', 'Cairo', system-ui, -apple-system, 'Segoe UI', Tahoma, sans-serif;
+  --font-display: 'Cairo', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+
+  --fs-display: clamp(28px, 6vw, 34px);
+  --fs-h1: clamp(22px, 4.4vw, 24px);
+  --fs-h2: clamp(18px, 3.4vw, 20px);
+  --fs-h3: 18px;
+  --fs-body: 15px;
+  --fs-sm: 13px;
+  --fs-xs: 12px;
+  --fs-2xs: 11px;
+
+  /* --- layout ----------------------------------------------------------- */
+  --nav-w: 244px;              /* desktop sidebar width                      */
+  --topbar-h: 60px;
+  --bottomnav-h: 66px;
+  --gutter: clamp(14px, 3.5vw, 28px);
+  --content-max: 1320px;
+
+  /* --- motion ----------------------------------------------------------- */
+  --ease: cubic-bezier(0.32, 0.72, 0.3, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --t-fast: 130ms;
+  --t-med: 190ms;
+  --t-slow: 260ms;
+
+  /* --- safe areas (notch / home indicator) ------------------------------ */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+
+  /* --- chart palette (crimson leads, gold follows) ---------------------- */
+  --chart-1: #ff1f3d;
+  --chart-2: #f2be6c;
+  --chart-3: #34d399;
+  --chart-4: #b4b4bd;
+  --chart-5: #7f9cf5;
+  --chart-6: #a97ac2;
+}

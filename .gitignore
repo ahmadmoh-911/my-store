@@ -1,0 +1,10 @@
+﻿node_modules/
+dist/
+build/
+.next/
+.git/
+*.apk
+*.aab
+*.log
+.DS_Store
+Thumbs.db

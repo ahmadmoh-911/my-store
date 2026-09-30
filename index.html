@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+  />
+  <title>متجري — إدارة متجر الملابس</title>
+  <meta name="description" content="نظام إدارة متجر الملابس: المخزون، نقطة البيع، العملاء والتقارير — يعمل بالكامل بدون إنترنت." />
+
+  <!-- PWA / installability -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#6B1D2F" />
+  <meta name="color-scheme" content="light" />
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="متجري" />
+  <meta name="application-name" content="متجري" />
+  <meta name="format-detection" content="telephone=no" />
+  <meta name="msapplication-TileColor" content="#6B1D2F" />
+
+  <!-- Styles: fonts first so tokens can reference the family names -->
+  <link rel="stylesheet" href="fonts/fonts.css" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/screens.css" />
+</head>
+<body>
+  <!-- Boot splash: shown until the first screen is rendered, then removed.
+       Uses the same shimmer as the skeleton loaders so there is never a white flash. -->
+  <div class="boot" id="boot" role="status" aria-live="polite">
+    <div class="boot__mark">
+      <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">
+        <path d="M12 8.5V6.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none" />
+        <path d="M12 8.5 3.6 15.2a.7.7 0 0 0 .6 1.15h15.6a.7.7 0 0 0 .6-1.15L12 8.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+        <path d="M4.2 17.4h15.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        <path d="M12 8.4a2.1 2.1 0 1 1 2.1-2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+      </svg>
+    </div>
+    <div class="boot__name">متجري</div>
+    <div class="boot__bar"><i></i></div>
+  </div>
+
+  <div class="shell" id="shell" hidden>
+    <!-- Sidebar is only shown from the tablet/desktop breakpoint up -->
+    <aside class="sidebar" id="sidebar"></aside>
+
+    <div class="shell__body">
+      <header class="topbar" id="topbar"></header>
+
+      <!-- Small offline pill; the app keeps working, this is just reassurance -->
+      <div class="offline" id="offline-bar" hidden>
+        <span class="offline__dot"></span>
+        <span>أنت غير متصل — كل شيء يعمل بدون إنترنت</span>
+      </div>
+
+      <main class="view" id="view" tabindex="-1"></main>
+    </div>
+
+    <!-- Mobile / tablet navigation -->
+    <nav class="bottomnav" id="bottomnav" aria-label="التنقل الرئيسي"></nav>
+  </div>
+
+  <!-- Overlay hosts -->
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="true"></div>
+  <div class="fly-layer" id="fly-layer" aria-hidden="true"></div>
+  <div class="print-root" id="print-root" aria-hidden="true"></div>
+
+  <!-- Fallback camera driver for phones where the system drawer lacks BarcodeDetector -->
+  <script src="vendor/html5-qrcode.min.js"></script>
+
+  <noscript>
+    <div style="padding:24px;font-family:sans-serif;text-align:center">
+      هذا التطبيق يحتاج تفعيل JavaScript ليعمل.
+    </div>
+  </noscript>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,332 @@
+/**
+ * Application entry point.
+ *
+ * Responsibilities:
+ *   1. register the service worker (offline support)
+ *   2. build the persistent chrome (topbar + sidebar footer)
+ *   3. seed demo data on first run
+ *   4. start the router and remove the boot splash
+ *   5. keep the connectivity indicator in sync
+ *   6. remember the install prompt for the Settings screen
+ */
+import { icon } from './icons.js';
+import { el, fromHTML, clear, escapeHTML, wait } from './utils.js';
+import { getSettings, listProducts } from './db.js';
+import { lowStockProducts } from './analytics.js';
+import { seedIfEmpty } from './seed.js';
+import { toast, closeTopOverlay } from './components.js';
+import { startRouter, renderNav, setLowStockCount, onRoute, navigate, getPath } from './router.js';
+import { mountCartBar } from './cart-bar.js';
+import { isNative, onNativeBack, minimizeApp } from './native.js';
+
+/* ------------------------------------------------------------------ *
+ * Service worker
+ * ------------------------------------------------------------------ */
+
+function registerServiceWorker() {
+  // Inside the Android shell every file is already bundled in the APK, so the
+  // cache layer is redundant and a second one only risks serving stale assets.
+  if (isNative()) return;
+  if (!('serviceWorker' in navigator)) return;
+
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('sw.js');
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', async () => {
+          // a new build finished installing while the app is open
+          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+            toast('يتوفر تحديث للتطبيق — أعد التشغيل لتطبيقه', 'info', 5200);
+          }
+        });
+      });
+    } catch (err) {
+      console.warn('[sw] registration failed', err);
+    }
+  });
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    // swallow the extra reload some browsers fire on first SW claim
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Topbar
+ * ------------------------------------------------------------------ */
+
+let currentSettings = null;
+
+function buildTopbar() {
+  const bar = document.getElementById('topbar');
+  if (!bar) return;
+
+  clear(bar);
+
+  // brand (mobile only — the sidebar carries it on desktop)
+  bar.appendChild(
+    el(
+      'a.brand',
+      { href: '#/dashboard', 'aria-label': 'متجري' },
+      el('span.brand__mark', { html: icon('hanger') }),
+      el('span.brand__name', { text: 'متجري' })
+    )
+  );
+
+  // contextual title (set by setTopbarContext); starts as the store name
+  bar.appendChild(
+    el(
+      'button.store-pill',
+      { type: 'button', id: 'store-pill', title: 'الإعدادات', onClick: () => navigate('settings') },
+      el('span.store-pill__dot'),
+      el('span.store-pill__name', { id: 'topbar-context', text: '—' }),
+      fromHTML(icon('chevronDown'))
+    )
+  );
+
+  const end = el('div.topbar__end');
+  end.appendChild(el('span.net-dot', { id: 'net-dot', title: 'متصل' }, el('i')));
+  end.appendChild(
+    el(
+      'button.icon-btn',
+      { type: 'button', 'aria-label': 'بيع جديد', title: 'بيع جديد', onClick: () => navigate('pos') },
+      fromHTML(icon('store'))
+    )
+  );
+  end.appendChild(
+    el(
+      'button.icon-btn',
+      { type: 'button', 'aria-label': 'الإعدادات', title: 'الإعدادات', onClick: () => navigate('settings') },
+      fromHTML(icon('settings'))
+    )
+  );
+  bar.appendChild(end);
+}
+
+function paintStoreName() {
+  const node = document.getElementById('topbar-context');
+  if (node && currentSettings) node.textContent = currentSettings.storeName;
+
+  const foot = document.getElementById('sidebar-foot');
+  if (foot && currentSettings) {
+    clear(foot);
+    foot.appendChild(
+      el(
+        'button.sidebar__store',
+        { type: 'button', onClick: () => navigate('settings') },
+        currentSettings.logo
+          ? el('img', { src: currentSettings.logo, alt: '' })
+          : el('span.logo-ph', { html: icon('hanger') }),
+        el(
+          'div',
+          {},
+          el('b', { class: 'store-pill__name', text: currentSettings.storeName }),
+          el('span', { text: currentSettings.storeTagline || 'إدارة المتجر' })
+        )
+      )
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Connectivity indicator
+ * ------------------------------------------------------------------ */
+
+function wireConnectivity() {
+  const bar = document.getElementById('offline-bar');
+  const dot = document.getElementById('net-dot');
+
+  const sync = () => {
+    const on = navigator.onLine;
+    if (bar) bar.hidden = on;
+    if (dot) {
+      dot.classList.toggle('is-off', !on);
+      dot.title = on ? 'متصل' : 'غير متصل — التطبيق يعمل محلياً';
+    }
+  };
+
+  window.addEventListener('online', () => {
+    sync();
+    toast('عاد الاتصال', 'ok', 1800);
+  });
+  window.addEventListener('offline', () => {
+    sync();
+    toast('لا يوجد إنترنت — كل البيانات متاحة محلياً', 'warn', 2600);
+  });
+  sync();
+}
+
+/* ------------------------------------------------------------------ *
+ * Install prompt (Android/Chrome/Edge)
+ * ------------------------------------------------------------------ */
+
+function wireInstallPrompt() {
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    window.__saherInstallPrompt = e;
+  });
+  window.addEventListener('appinstalled', () => {
+    window.__saherInstallPrompt = null;
+    toast('تم تثبيت التطبيق', 'ok');
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Low-stock badge
+ * ------------------------------------------------------------------ */
+
+async function refreshLowStockBadge() {
+  try {
+    const threshold = currentSettings?.lowStockThreshold ?? 5;
+    const products = await listProducts();
+    const low = lowStockProducts(products, threshold);
+    setLowStockCount(low.length);
+  } catch {
+    /* badge is cosmetic — never block the UI on it */
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Hardware back button (Android)
+ * ------------------------------------------------------------------ */
+
+/**
+ * WebView has no Escape key, so the physical back button is mapped to the
+ * closest equivalent: close the topmost overlay, else walk back through the
+ * screens visited in this session, else send the app to the background.
+ */
+function wireNativeBack() {
+  if (!isNative()) return;
+
+  // seeded with the screen already on screen, so the first back press has
+  // somewhere to go even before the user has navigated anywhere
+  const trail = [getPath()];
+  onRoute(() => {
+    const path = getPath();
+    if (trail[trail.length - 1] !== path) trail.push(path);
+  });
+
+  onNativeBack(() => {
+    if (closeTopOverlay()) return;
+
+    if (trail.length > 1) {
+      trail.pop();
+      navigate(trail[trail.length - 1], { replace: true });
+      return;
+    }
+
+    // already at the start of the session — don't kill the app outright
+    minimizeApp();
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Global niceties
+ * ------------------------------------------------------------------ */
+
+function wireGlobalHandlers() {
+  // print → clear the print root afterwards so the DOM never holds a big table
+  window.addEventListener('afterprint', () => {
+    const root = document.getElementById('print-root');
+    if (root) clear(root);
+  });
+
+  // block pinch-zoom double-tap on iOS outside form fields
+  let lastTouch = 0;
+  document.addEventListener(
+    'touchend',
+    (e) => {
+      const now = Date.now();
+      if (now - lastTouch < 300 && !e.target.closest('input,textarea,select,[contenteditable]')) {
+        e.preventDefault();
+      }
+      lastTouch = now;
+    },
+    { passive: false }
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+
+async function boot() {
+  const splash = document.getElementById('boot');
+  const shell = document.getElementById('shell');
+
+  try {
+    currentSettings = await getSettings();
+  } catch (err) {
+    console.error('[boot] settings failed', err);
+    currentSettings = null;
+  }
+
+  // first run → demo catalogue so the app is never an empty shell
+  try {
+    const result = await seedIfEmpty();
+    if (result.seeded) {
+      console.info(`[boot] seeded ${result.products} products, ${result.sales} sales, ${result.suppliers} suppliers`);
+    }
+    currentSettings = await getSettings();
+  } catch (err) {
+    console.error('[boot] seed failed', err);
+  }
+
+  buildTopbar();
+  paintStoreName();
+
+  // The sticky cart bar lives in document.body, outside #view, so a sale in
+  // progress survives every navigation. Mounted before the first screen so it
+  // is never missing for the opening render.
+  const cartBar = mountCartBar();
+
+  // render the first screen before revealing the shell so there's no flash
+  renderNav('dashboard');
+  await startRouter();
+
+  shell.hidden = false;
+  // let the first screen paint, then dissolve the splash
+  await wait(40);
+  splash.classList.add('is-done');
+  setTimeout(() => splash.remove(), 420);
+
+  wireConnectivity();
+  wireInstallPrompt();
+  wireGlobalHandlers();
+  wireNativeBack();
+  refreshLowStockBadge();
+
+  // keep the store name in the chrome in sync when Settings saves
+  onRoute((current) => {
+    // `current` is the router's route object ({ path, route, params, order }),
+    // not a path string — syncRoute compares against 'pos', so pass the path.
+    const path = current?.path || '';
+    // fold the cart bar away when leaving POS, and re-check its numbers
+    cartBar.syncRoute(path);
+    getSettings().then((s) => {
+      if (s.storeName !== currentSettings?.storeName) {
+        currentSettings = s;
+        paintStoreName();
+      }
+      refreshLowStockBadge();
+    });
+  });
+
+  console.info('[saher] ready');
+}
+
+/* ------------------------------------------------------------------ *
+ * Go
+ * ------------------------------------------------------------------ */
+
+registerServiceWorker();
+boot().catch((err) => {
+  console.error('[boot] fatal', err);
+  const splash = document.getElementById('boot');
+  if (splash) {
+    splash.innerHTML =
+      `<div class="boot__name">تعذّر تشغيل التطبيق</div>` +
+      `<p style="color:#a08b8f;font-size:13px;max-width:280px;text-align:center;margin-top:6px">${escapeHTML(err.message || String(err))}</p>`;
+  }
+});
