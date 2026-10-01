@@ -196,8 +196,8 @@ async function boot(host) {
         el(
           'div.export-row',
           {},
-          el('button.btn.btn--primary', { type: 'button', onClick: doExport }, fromHTML(icon('download')), el('span', { text: 'تصدير نسخة احتياطية' })),
-          el('button.btn.btn--soft', { type: 'button', onClick: doImport }, fromHTML(icon('upload')), el('span', { text: 'استعادة من ملف' }))
+          el('button.btn.btn--primary', { type: 'button', onClick: (e) => doExport(e.currentTarget) }, fromHTML(icon('download')), el('span', { text: 'تصدير نسخة احتياطية' })),
+          el('button.btn.btn--soft', { type: 'button', onClick: (e) => doImport(e.currentTarget) }, fromHTML(icon('upload')), el('span', { text: 'استعادة من ملف' }))
         )
       )
     ])
@@ -269,7 +269,10 @@ async function boot(host) {
   );
   host.appendChild(el('div.form-actions', {}, saveBtn));
 
-  async function doExport() {
+  async function doExport(btn) {
+    if (btn) btn.disabled = true;
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) btn.innerHTML = `${fromHTML(icon('spinner'))}<span>جاري التصدير…</span>`;
     try {
       const data = await exportAll();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -278,20 +281,36 @@ async function boot(host) {
     } catch (e) {
       console.error(e);
       toast('تعذّر التصدير', 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
     }
   }
 
-  async function doImport() {
+  async function doImport(btn) {
+    if (btn) btn.disabled = true;
+    const originalText = btn ? btn.innerHTML : '';
+    if (btn) btn.innerHTML = `${fromHTML(icon('spinner'))}<span>جاري الاستيراد…</span>`;
     const file = await pickFile('application/json,.json');
-    if (!file) return;
+    if (!file) {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
+      return;
+    }
 
     let data;
     try {
       data = JSON.parse(await readFileAsText(file));
     } catch {
+      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
       return toast('الملف ليس JSON صالحاً', 'err');
     }
     if (!data || data.app !== 'saher') {
+      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
       return toast('ملف النسخة الاحتياطية غير صالح', 'err');
     }
 
@@ -305,7 +324,10 @@ async function boot(host) {
       message: `سيُستبدل المحتوى الحالي (${nP} منتج · ${nS} فاتورة بيع · ${nU} مورد · ${nI} فاتورة شراء). لا يمكن التراجع.`,
       confirmLabel: 'استعادة',
     });
-    if (!yes) return;
+    if (!yes) {
+      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
+      return;
+    }
 
     try {
       await importAll(data);
@@ -315,6 +337,11 @@ async function boot(host) {
     } catch (e) {
       console.error(e);
       toast('تعذّرت الاستعادة', 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+      }
     }
   }
 

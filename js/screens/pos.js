@@ -624,7 +624,7 @@ function totalsBlock(cur) {
         {},
         el('button', {
           type: 'button',
-          text: 'ILS',
+          text: cache.settings?.currency || 'ILS',
           class: discount.type === 'fixed' ? 'is-active' : '',
           onClick: () => { discount.type = 'fixed'; paintCart(); },
         }),
