@@ -676,59 +676,69 @@ async function completeSale() {
     return;
   }
 
-  // guard against stock that changed since the cart was built
-  const products = await listProducts();
-  const byId = new Map(products.map((p) => [p.id, p]));
-  for (const line of cart) {
-    const p = byId.get(line.productId);
-    const available = p ? variantStock(p, line.size, line.color) : 0;
-    if (line.qty > available) {
-      toast(`«${line.name}» متاح ${available} فقط`, 'err');
-      return;
+  const btn = document.querySelector('.checkout-btn');
+  if (btn) btn.disabled = true;
+
+  try {
+    // guard against stock that changed since the cart was built
+    const products = await listProducts();
+    const byId = new Map(products.map((p) => [p.id, p]));
+    for (const line of cart) {
+      const p = byId.get(line.productId);
+      const available = p ? variantStock(p, line.size, line.color) : 0;
+      if (line.qty > available) {
+        toast(`«${line.name}» متاح ${available} فقط`, 'err');
+        return;
+      }
     }
+
+    const seq = await seqForToday();
+
+    const sale = await createSale({
+      items: cart.map((l) => ({
+        productId: l.productId,
+        name: l.name,
+        size: l.size,
+        color: l.color,
+        qty: l.qty,
+        price: l.price,
+        costPrice: l.costPrice,
+      })),
+      discountType: discount.type,
+      discountValue: discount.value || 0,
+      paymentMethod: getPaymentMethod(),
+      receiptSeq: seq,
+    });
+
+    setLastSale(sale);
+    const settings = await getSettings();
+
+    await celebrate({
+      title: 'تمت عملية البيع',
+      sub: `فاتورة ${sale.receiptNo} · ${moneyHTML(sale.total, settings.currency)}`,
+      ms: 1400,
+    });
+
+    // reset for the next sale
+    clearCart();
+    setPaymentMethod('cash');
+    invalidateCache();
+
+    // createSale() just rewrote quantities in IndexedDB, so the Inventory screen's
+    // module-level cache is stale too — otherwise walking to المخزن after a sale
+    // shows pre-sale stock. Same dynamic import the product form already uses,
+    // so no static import (and no import cycle) is introduced.
+    import('./products.js').then((m) => m.invalidate()).catch(() => {});
+
+    paintCart();
+    paintProducts();
+    showReceipt(sale, settings);
+  } catch (err) {
+    console.error('[completeSale] error:', err);
+    toast('فشل إتمام البيع: ' + (err.message || err), 'err');
+  } finally {
+    if (btn) btn.disabled = false;
   }
-
-  const seq = await seqForToday();
-
-  const sale = await createSale({
-    items: cart.map((l) => ({
-      productId: l.productId,
-      name: l.name,
-      size: l.size,
-      color: l.color,
-      qty: l.qty,
-      price: l.price,
-      costPrice: l.costPrice,
-    })),
-    discountType: discount.type,
-    discountValue: discount.value || 0,
-    paymentMethod: getPaymentMethod(),
-    receiptSeq: seq,
-  });
-
-  setLastSale(sale);
-  const settings = await getSettings();
-
-  await celebrate({
-    title: 'تمت عملية البيع',
-    sub: `فاتورة ${sale.receiptNo} · ${moneyHTML(sale.total, settings.currency)}`,
-    ms: 1400,
-  });
-
-  // reset for the next sale
-  clearCart();
-  setPaymentMethod('cash');
-  invalidateCache();
-
-  // createSale() just rewrote quantities in IndexedDB, so the Inventory screen's
-  // module-level cache is stale too — otherwise walking to المخزن after a sale
-  // shows pre-sale stock. Same dynamic import the product form already uses,
-  // so no static import (and no import cycle) is introduced.
-  import('./products.js').then((m) => m.invalidate()).catch(() => {});
-
-  paintCart();
-  paintProducts();
-  showReceipt(sale, settings);
 }
 
 /** Receipt numbers are sequential within the current day. */

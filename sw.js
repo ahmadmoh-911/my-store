@@ -16,7 +16,7 @@
    the old copy until you do.
    ========================================================================== */
 
-const VERSION = 'v9';
+const VERSION = 'v10';
 const CACHE = `saher-${VERSION}`;
 
 /* Everything the app needs to boot offline. Keep in sync with /js /css /fonts. */

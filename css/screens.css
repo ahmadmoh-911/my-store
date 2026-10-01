@@ -624,12 +624,14 @@
 /* The cart column is sticky on ALL screen sizes so the checkout button is
    always reachable. On desktop it sits beside the product grid; on mobile it
    sticks below the topbar and scrolls internally. A z-index above the bottom
-   nav ensures the checkout button is never covered. */
+   nav ensures the checkout button is never covered.
+   Using `dvh` (dynamic viewport height) instead of `vh` so the height adapts
+   when mobile browser chrome (address bar) shows/hides. */
 .pos__cart {
   position: sticky;
   top: calc(var(--topbar-h) + 16px);
   z-index: 50;
-  max-height: calc(100vh - var(--topbar-h) - var(--bottomnav-h) - var(--safe-b) - 32px);
+  max-height: calc(100dvh - var(--topbar-h) - var(--bottomnav-h) - var(--safe-b) - 32px);
   overflow-y: auto;
 }
 @media (min-width: 1040px) {
@@ -838,6 +840,9 @@
   border-radius: var(--r-lg);
   justify-content: space-between;
   padding-inline: 20px;
+  /* Improve touch response on mobile: prevents 300ms delay and
+     allows native scrolling if the touch moves slightly. */
+  touch-action: manipulation;
 }
 
 /* receipt
@@ -1530,7 +1535,7 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 }
 
 .cb-actions .btn { flex: 1 1 auto; }
-.cb-checkout { flex: 2 1 auto !important; }
+.cb-checkout { flex: 2 1 auto !important; touch-action: manipulation; }
 
 /* --- empty state -------------------------------------------------- */
 .cb-empty {
