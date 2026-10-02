@@ -574,6 +574,9 @@ function buildForm(d, settings, editingId) {
           value: String(d.qty.get(k) ?? 0),
           oninput: (e) => {
             const v = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
+            // Emptied rather than zeroed, so "no stock" and "a bad value" do not
+            // look identical while the owner is still typing.
+            if (v === 0 && e.target.value !== '' && parseFloat(e.target.value) < 0) e.target.value = '';
             d.qty.set(k, v);
             input.classList.toggle('is-low', v > 0 && v <= (Number(settings.lowStockThreshold) || 5));
             input.animate([{ transform: 'scale(1.12)' }, { transform: 'scale(1)' }], { duration: 220, easing: 'cubic-bezier(.34,1.56,.64,1)' });
@@ -678,7 +681,15 @@ function buildForm(d, settings, editingId) {
     const common = {
       id,
       value: opts.value ?? '',
-      oninput: (e) => opts.onInput && opts.onInput(e.target.value),
+      // Money fields refuse a negative where it is typed, rather than only at
+      // submit time: the value is removed from the box, so the number on screen
+      // and the number about to be saved can never disagree.
+      oninput: (e) => {
+        if (opts.money && e.target.value !== '' && !(parseFloat(e.target.value) >= 0)) {
+          e.target.value = '';
+        }
+        opts.onInput && opts.onInput(e.target.value);
+      },
       onblur: (e) => opts.onInput && opts.onInput(e.target.value),
     };
     const control = opts.textarea

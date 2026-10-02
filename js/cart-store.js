@@ -80,21 +80,46 @@ export const totalItems = () => cart.reduce((t, l) => t + l.qty, 0);
 export const lineCount = () => cart.length;
 
 export function discountAmount(sub = subtotal()) {
-  if (!discount.value) return 0;
+  // `discount.value` is clamped by setDiscount(); the clamp is repeated here so
+  // a hand-edited store object can never produce a negative total either.
+  const v = Math.max(0, Number(discount.value) || 0);
+  if (!v) return 0;
   // A percentage over 100 is treated as 100%, not as a negative total.
-  if (discount.type === 'percent') return Math.min(sub, (sub * Math.min(discount.value, 100)) / 100);
-  return Math.min(sub, discount.value);
+  if (discount.type === 'percent') return Math.min(sub, (sub * Math.min(v, 100)) / 100);
+  return Math.min(sub, v);
 }
 
 export const grandTotal = () => Math.max(0, subtotal() - discountAmount());
+
+/**
+ * The one supported way to touch the discount.
+ *
+ * A discount can never be negative and a percentage can never exceed 100 —
+ * both are refused here, at the single place the value is written, instead of
+ * being trusted from whichever screen happens to own the input this frame.
+ */
+export function setDiscount(type, value) {
+  discount.type = type === 'percent' ? 'percent' : 'fixed';
+  discount.value = Math.max(0, Number(value) || 0);
+  return discount.value;
+}
 
 /* ------------------------------------------------------------------ *
  * Payment + last sale
  * ------------------------------------------------------------------ */
 
+export const PAYMENT_METHODS = [
+  { id: 'cash', label: 'نقداً' },
+  { id: 'card', label: 'بطاقة' },
+  { id: 'transfer', label: 'تحويل' },
+];
+
 export const getPaymentMethod = () => paymentMethod;
+
+/** Only a known method can be selected. */
 export function setPaymentMethod(id) {
-  paymentMethod = id;
+  if (PAYMENT_METHODS.some((p) => p.id === id)) paymentMethod = id;
+  return paymentMethod;
 }
 
 export const getLastSale = () => lastSale;
@@ -105,6 +130,36 @@ export function setLastSale(sale) {
 /* ------------------------------------------------------------------ *
  * Mutators — each one keeps the bar in step
  * ------------------------------------------------------------------ */
+
+/**
+ * Puts a product in the basket, or bumps it if it is already there.
+ *
+ * Everything about the line is normalised here — a line is always at least one
+ * whole piece, always priced at zero or more, and never more than the stock its
+ * variant actually has. Callers that build the line by hand would each have to
+ * remember that, and the ones that forget would sell stock that is not there.
+ *
+ * @returns {'added'|'bumped'|'full'} so the caller can say the right thing
+ */
+export function addLine(line) {
+  const max = Math.max(0, Math.round(Number(line.max) || 0));
+  const existing = cart.find((l) => l.key === line.key);
+  if (existing) {
+    if (existing.qty >= max) return 'full';
+    existing.qty = Math.min(existing.qty + 1, max);
+    emit('added');
+    return 'bumped';
+  }
+  cart.push({
+    ...line,
+    qty: Math.min(1, max || 1),
+    price: Math.max(0, Number(line.price) || 0),
+    costPrice: Math.max(0, Number(line.costPrice) || 0),
+    max,
+  });
+  emit('added');
+  return 'added';
+}
 
 export function clearCart() {
   cart.length = 0;
@@ -126,7 +181,10 @@ export function setQty(key, qty) {
   const line = cart.find((l) => l.key === key);
   if (!line) return;
   const max = Number(line.max) || 0;
-  const next = Math.max(0, Math.min(qty, max || qty));
+  // Rounded and floored at zero: a quantity is a count of whole pieces, and a
+  // negative one would take stock IN rather than give it back.
+  const asked = Math.round(Number(qty) || 0);
+  const next = Math.max(0, Math.min(asked, max || asked));
   if (next === 0) {
     removeLine(key);
     return;

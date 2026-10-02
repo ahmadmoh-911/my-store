@@ -725,32 +725,23 @@
 /* ==========================================================================
    4 آ· POS / Sales
    ========================================================================== */
+/* One column, always. The "الطلب الحالي" column that used to sit beside the grid
+   is gone — the cart panel (cart-bar.js) is the single place the invoice exists,
+   and a second copy beside the products meant two quantities, two totals and two
+   checkout buttons that could disagree with each other. The grid therefore takes
+   the whole width, and gets more columns on a wide screen for free.
+   `minmax(0,…)` not a bare 1fr: a bare 1fr track floors at the content's
+   min-content width, which used to let the cart push the whole POS wider than
+   the phone viewport and scroll the page sideways. */
 .pos {
   display: grid;
   gap: 16px;
-  /* minmax(0,…) not a bare 1fr: a bare 1fr track floors at the content's
-     min-content width, which let the cart push the whole POS wider than the
-     phone viewport and scroll the page sideways. */
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
 }
 
-/* The cart column is sticky on ALL screen sizes so the checkout button is
-   always reachable. On desktop it sits beside the product grid; on mobile it
-   sticks below the topbar and scrolls internally. A z-index above the bottom
-   nav ensures the checkout button is never covered.
-   Using `dvh` (dynamic viewport height) instead of `vh` so the height adapts
-   when mobile browser chrome (address bar) shows/hides. */
-.pos__cart {
-  position: sticky;
-  top: calc(var(--topbar-h) + 16px);
-  z-index: 50;
-  max-height: calc(100dvh - var(--topbar-h) - var(--bottomnav-h) - var(--safe-b) - 32px);
-  overflow-y: auto;
-}
 @media (min-width: 1040px) {
-  .pos { grid-template-columns: minmax(0, 1.35fr) minmax(340px, 1fr); }
-  .pos__cart { max-height: none; overflow-y: visible; }
+  .pos-grid { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
 }
 
 .pos-grid {
@@ -1208,8 +1199,13 @@
 .stmt-row__bal { font-size: var(--fs-2xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
 /* --- invoice settlement block (paid / remaining) --------------------- */
+/* Four figures, not three: an invoice can be settled with money handed over now,
+   with an advance the supplier was already holding, or leave a surplus that
+   becomes THEIR credit. Printing only "what is left" made an overpayment look
+   exactly like a discount, and the money silently disappeared from the books.
+   The grid auto-fits, so it reflows from four across to two on a 360px phone. */
 .stmt-settle { margin-top: 10px; }
-.stmt-settle__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.stmt-settle__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 7px; }
 .stmt-cell {
   display: grid;
   gap: 2px;
@@ -1221,6 +1217,29 @@
 }
 .stmt-cell b { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
 .stmt-cell.is-owed { border-color: var(--danger-tint); background: var(--danger-tint); }
+
+/* Credit the supplier is owed BY us — money in our pocket, not money owed. */
+.stmt-cell.is-credit { border-color: var(--success); background: var(--success-tint); }
+
+/* The standing note about the supplier's advance, shown under the amount box in
+   the payment form and under the settlement block in the invoice form. */
+.sup-advance-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-inline-start: 3px solid var(--primary);
+  border-radius: var(--r-sm);
+  background: var(--primary-tint);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+.sup-advance-note[hidden] { display: none; }
+.sup-advance-note svg { width: 15px; height: 15px; color: var(--primary); flex-shrink: 0; }
+.sup-advance-note b { color: var(--ink); font-variant-numeric: tabular-nums; }
 
 /* ==========================================================================
    6 آ· Reports
@@ -1728,10 +1747,15 @@
 /* ================================================================== *
  * Sticky cart bar
  *
- * Pinned above the bottom nav on every screen, so a sale in progress is
- * always one tap away. Collapsed it is a single slim row; tapping opens
- * the full basket. Body gets extra bottom padding while it is visible
+ * Pinned above the bottom nav, and drawn only on the sale screen —
+ * `body.is-pos` (set by the router) is the single switch, and
+ * cart-bar.js honours it for the bar, the panel and the topbar count
+ * together. Collapsed it is a single slim row; tapping opens the full
+ * basket. Body gets extra bottom padding while it is visible
  * (.has-cartbar) so it never sits on top of the last card on screen.
+ *
+ * Below the modal backdrops (90/91), so a receipt or a confirm dialog
+ * lands ON TOP of the cart rather than under it.
  * ================================================================== */
 
 body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64px); }
@@ -1830,15 +1854,15 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 
 .cb-scrim.is-on { opacity: 1; pointer-events: auto; }
 
-/* The floating cart is a permanent affordance — it stands on every screen,
-   POS included. It used to be display:none on POS, which meant the cart
-   vanished the moment the invoice took over the screen. */
+/* The cart exists on the sale screen only (body.is-pos, set by the router).
+   Anything outside POS stays translated off-screen and, crucially, is still in
+   the document — the basket keeps its contents, it just is not drawn. */
 .cb-panel {
   position: fixed;
   inset-inline: 0;
   bottom: calc(var(--bottomnav-h) + var(--safe-b));
   z-index: 62;
-  max-height: min(72dvh, 560px);
+  max-height: min(78dvh, 640px);
   display: flex;
   flex-direction: column;
   margin: 0 auto;
@@ -1859,6 +1883,54 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   transform: translateY(0);
   visibility: visible;
 }
+
+/* --- panel header: the panel says what it is ---------------------- */
+/* The panel IS the "الطلب الحالي". Labelling it is what tells the owner that the
+   invoice lives here now, instead of in a column that no longer exists. */
+.cb-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-hi);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+}
+
+.cb-head__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.cb-head__title svg { width: 17px; height: 17px; color: var(--primary); }
+
+.cb-head__count {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--primary-tint);
+  color: var(--primary);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+}
+
+.cb-head__x {
+  margin-inline-start: auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.cb-head__x:hover { background: var(--surface-2); color: var(--ink); }
+.cb-head__x svg { width: 16px; height: 16px; }
 
 .cb-lines {
   flex: 1 1 auto;
@@ -1910,6 +1982,22 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   color: var(--ink-3);
 }
 
+/* The unit price, printed on the line. Before the "الطلب الحالي" column was
+   removed this was the one figure the invoice never showed — the owner could
+   see what a line cost and how many were in it, but not the price of one piece,
+   which is exactly the number you need to check when something is wrong. */
+.cb-line__unit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.cb-line__unit svg { width: 11px; height: 11px; flex-shrink: 0; opacity: 0.75; }
+.cb-line__unit .cur { font-size: 9px; }
+
 .cb-line__ctrl {
   display: flex;
   align-items: center;
@@ -1917,14 +2005,27 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   flex-shrink: 0;
 }
 
+/* The stepper keeps its three parts on one row so the quantity and the line
+   total stay visually paired — reading a number next to a different number is
+   how a wrong total slips past. */
+.cb-qty-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hi);
+  border: 1px solid var(--line);
+}
+
 .cb-qty {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--surface-hi);
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
   color: var(--ink);
   cursor: pointer;
   transition: background 0.15s, opacity 0.15s;
@@ -1935,7 +2036,7 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 .cb-qty svg { width: 14px; height: 14px; }
 
 .cb-qty__n {
-  min-width: 20px;
+  min-width: 22px;
   text-align: center;
   font-size: var(--fs-sm);
   font-weight: 800;
@@ -1954,8 +2055,8 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 .cb-line__x {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
@@ -1995,6 +2096,43 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   color: var(--ink);
 }
 
+/* The discount box sits inside the totals block, so subtotal, discount and final
+   total read as one figure list instead of three separate things to hunt for. */
+.cb-discount { margin: 6px 0 2px; }
+
+/* --- payment method ---------------------------------------------- */
+.cb-pay {
+  display: flex;
+  gap: 7px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-hi);
+}
+
+.cb-pay .pay-method {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.cb-pay .pay-method:hover { background: var(--surface-2); }
+.cb-pay .pay-method.is-on {
+  background: var(--primary-tint);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
 .cb-actions {
   display: flex;
   gap: 8px;
@@ -2006,7 +2144,8 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 .cb-checkout { flex: 2 1 auto !important; touch-action: manipulation; }
 
 /* --- empty state -------------------------------------------------- */
-/* Reachable from every screen, including with nothing in the basket. */
+/* Reachable from the topbar cart button with nothing in the basket — the panel
+   says so plainly and offers the way out instead of doing nothing. */
 .cb-empty {
   display: grid;
   place-items: center;
@@ -2016,11 +2155,6 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 }
 .cb-empty svg { width: 34px; height: 34px; }
 .cb-empty p { margin: 0; font-size: var(--fs-sm); }
-
-/* The floating cart is a permanent affordance — it stands on every screen,
-   POS included. `display:none` on POS used to make the cart vanish the moment
-   the invoice took over the screen. */
-body.is-pos.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b)); }
 
 @media (prefers-reduced-motion: reduce) {
   .cb-bar, .cb-panel, .cb-scrim { transition: none; }

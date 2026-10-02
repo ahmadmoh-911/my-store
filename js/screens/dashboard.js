@@ -337,28 +337,45 @@ function renderDayInvoices(root, sales, settings) {
 
   // Its own day stepper, inside the section it changes: walking to yesterday's
   // invoices should not mean scrolling back to the top of the screen first.
+  //
+  // Order and arrows are the RTL mirror of an LTR calendar: in RTL the eye
+  // starts at the right, so "yesterday" sits on the right pointing right
+  // (chevronRight) and "tomorrow" on the left pointing left (chevronLeft). The
+  // date itself is always printed, "اليوم" only adds that it is today — a
+  // stepper whose middle says just "اليوم" leaves you guessing which day.
   const today = isToday(viewDate);
   const stepper = el(
     'div.inv-daynav',
-    {},
+    { role: 'group', 'aria-label': 'التنقل بين الأيام' },
     el(
-      'button.icon-btn.icon-btn--sm',
+      'button.icon-btn.icon-btn--sm.inv-daynav__btn',
+      {
+        type: 'button',
+        'aria-label': 'اليوم السابق',
+        title: 'اليوم السابق',
+        onClick: () => setDay(-1),
+      },
+      fromHTML(icon('chevronRight'))
+    ),
+    el(
+      'div.inv-daynav__mid',
+      {},
+      today ? el('b.inv-daynav__now', { text: 'اليوم' }) : null,
+      el('span.inv-daynav__label', { text: fmtDate(viewDate) }),
+      !today ? el('span.inv-daynav__day', { text: fmtDayName(viewDate) }) : null
+    ),
+    el(
+      'button.icon-btn.icon-btn--sm.inv-daynav__btn',
       {
         type: 'button',
         'aria-label': 'اليوم التالي',
         title: 'اليوم التالي',
+        // Nowhere forward to go from today, so the button says so instead of
+        // moving the date and pretending the empty day had invoices.
         disabled: today ? '' : null,
         onClick: () => setDay(1),
       },
       fromHTML(icon('chevronLeft'))
-    ),
-    el('span.inv-daynav__label', {
-      text: today ? 'اليوم' : `${fmtDayName(viewDate)} · ${fmtDate(viewDate)}`,
-    }),
-    el(
-      'button.icon-btn.icon-btn--sm',
-      { type: 'button', 'aria-label': 'اليوم السابق', title: 'اليوم السابق', onClick: () => setDay(-1) },
-      fromHTML(icon('chevronRight'))
     )
   );
 

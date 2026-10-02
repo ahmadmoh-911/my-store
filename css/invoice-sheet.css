@@ -1,0 +1,306 @@
+/* ==========================================================================
+   Invoice sheet — the receipt you open from Reports or the dashboard
+
+   This block did not exist. Every class below (.inv, .inv-meta, .inv-item,
+   .inv-totals, …) was emitted by js/invoice-sheet.js and styled by nothing, so
+   a list of plain divs stacked on the sheet's dark backdrop with no separation
+   and the text ran into the text below it — unreadable, and impossible to check
+   a number against. Same theme, cards, borders and dividers as the rest of the
+   app, laid out the way a paper receipt is: who and when at the top, one card
+   per line, and the money in one block at the bottom.
+   ========================================================================== */
+
+.inv {
+  display: grid;
+  gap: 11px;
+}
+
+/* --- header: what this invoice is, before anything else ------------- */
+.inv-head {
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-hi);
+}
+
+.inv-head__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 9px;
+  margin-bottom: 9px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.inv-head__label {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+/* The receipt number is the single biggest thing on the sheet: it is the one
+   figure the owner reads out loud when someone asks "which invoice?" */
+.inv-head__no {
+  font-size: var(--fs-h2);
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-head__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.inv-head__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.inv-head__fact svg { width: 14px; height: 14px; color: var(--ink-3); flex-shrink: 0; }
+
+/* --- the lines, one card each --------------------------------------- */
+.inv-items {
+  display: grid;
+  gap: 8px;
+}
+
+.inv-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  /* --card, not a made-up token: an undefined custom property resolves to
+     nothing at all, which leaves the line with no fill and the text sitting on
+     the sheet's backdrop. This is the same fill the header and totals use. */
+  background: var(--card);
+}
+
+.inv-item__img {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--r-sm);
+  object-fit: cover;
+  background: var(--surface-hi);
+  flex-shrink: 0;
+}
+
+.inv-item__img--none {
+  display: grid;
+  place-items: center;
+  color: var(--ink-3);
+}
+
+.inv-item__main { flex: 1 1 auto; min-width: 0; }
+
+.inv-item__name {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.inv-item__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+
+/* Quantity, unit price and line total, as three labelled figures. A bare
+   "×3 … 150" gives the eye one number to guess at; a cell with a caption above
+   it can be read straight off, and on a phone nothing overlaps. */
+.inv-item__grid {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.inv-cell {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 1px;
+  min-width: 62px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hi);
+}
+
+.inv-cell__k {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.inv-cell__v {
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.inv-cell__v .cur { font-size: 9px; color: var(--ink-3); }
+
+.inv-cell--sum {
+  background: var(--primary-tint);
+}
+.inv-cell--sum .inv-cell__k { color: var(--primary); }
+.inv-cell--sum .inv-cell__v { color: var(--primary); }
+
+@media (max-width: 420px) {
+  .inv-cell { min-width: 0; padding: 5px 6px; }
+  .inv-cell__k { font-size: 9px; }
+}
+
+/* --- money, in one block -------------------------------------------- */
+.inv-totals {
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+}
+
+.inv-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+.inv-total .cur { font-size: var(--fs-2xs); color: var(--ink-3); }
+
+.inv-total--off { color: var(--ok); font-weight: 700; }
+
+.inv-total--grand {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: var(--fs-h3);
+  font-weight: 800;
+  color: var(--ink);
+}
+
+/* --- notes + warnings ----------------------------------------------- */
+.inv-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-dim);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
+.inv-note svg { width: 15px; height: 15px; color: var(--ink-3); flex-shrink: 0; }
+
+.inv-warn {
+  margin: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--danger-tint);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--danger);
+}
+
+.inv-foot {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.inv-foot .btn { flex: 1 1 auto; }
+
+/* --- the editor ----------------------------------------------------- */
+.inv-item--edit {
+  flex-wrap: wrap;
+  background: var(--surface-hi);
+}
+
+.inv-qty {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.inv-qty__n {
+  min-width: 22px;
+  text-align: center;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-price {
+  width: 84px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-dim);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: start;
+}
+.inv-price:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+.inv-item__sum {
+  min-width: 66px;
+  text-align: end;
+  font-size: var(--fs-sm);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.inv-item__sum .cur { font-size: 9px; color: var(--ink-3); }
+
+.inv-item__x {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.inv-item__x:hover { background: var(--danger-tint); color: var(--danger); }
+.inv-item__x svg { width: 15px; height: 15px; }
+
+.inv-edit-opts {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.inv-field { display: grid; gap: 5px; }
+
+.inv-field__label {
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  color: var(--ink-3);
+}

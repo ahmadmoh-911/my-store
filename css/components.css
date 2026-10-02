@@ -907,26 +907,75 @@ button.size-pill:active { transform: scale(0.9); }
 .inv-list { display: grid; gap: 9px; }
 
 /* Day stepper that lives inside the invoices card, so walking to another day
-   never means scrolling back up to the top of the dashboard first. */
+   never means scrolling back up to the top of the dashboard first.
+
+   Real buttons with real icons — 40px square, which is a thumb target and not a
+   decoration — and the date in the middle at the same weight as the buttons are
+   tall, so the stepper reads as one control rather than two grey squares with a
+   word between them. */
 .inv-daynav {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  align-items: stretch;
+  gap: 2px;
   padding: 3px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--r-pill);
   background: var(--surface-hi);
+  flex-shrink: 0;
 }
+
+.inv-daynav__btn {
+  width: 40px;
+  height: 40px;
+  align-self: center;
+  border-radius: var(--r-pill);
+}
+
+.inv-daynav__mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 0;
+  padding: 0 8px;
+  line-height: 1.15;
+}
+
+/* "اليوم" is a badge above the date, not a replacement for it: a stepper that
+   only says "today" gives no way to tell which today. */
+.inv-daynav__now {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--primary);
+  letter-spacing: 0.2px;
+}
+
 .inv-daynav__label {
   min-width: 0;
-  padding: 0 6px;
-  font-size: var(--fs-2xs);
-  font-weight: 700;
-  color: var(--ink-2);
+  font-size: var(--fs-xs);
+  font-weight: 800;
+  color: var(--ink);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-daynav__day {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-3);
   white-space: nowrap;
 }
+
 @media (max-width: 380px) {
-  .inv-daynav__label { max-width: 92px; overflow: hidden; text-overflow: ellipsis; }
+  .inv-daynav__btn { width: 36px; height: 36px; }
+  .inv-daynav__mid { padding: 0 6px; }
+  .inv-daynav__label {
+    font-size: var(--fs-2xs);
+    max-width: 92px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 
 .inv-card {

@@ -11,13 +11,13 @@
  */
 import { icon } from '../icons.js';
 import {
-  el, fromHTML, clear, moneyHTML, num, debounce, initials, fmtDate, sum, isoDate,
+  el, fromHTML, clear, escapeHTML, moneyHTML, num, debounce, initials, fmtDate, sum, isoDate,
 } from '../utils.js';
 import {
   listSuppliers, saveSupplier, deleteSupplier,
   listSupplierInvoices, createSupplierInvoice, deleteSupplierInvoice,
   listSupplierPayments, createSupplierPayment,
-  allSupplierBalances, supplierBalance, getSettings, PAYMENT_METHODS,
+  allSupplierBalances, supplierBalance, advanceAvailable, getSettings, PAYMENT_METHODS,
 } from '../db.js';
 import {
   pageHead, emptyState, openModal, confirmDialog, toast, sectionTitle, loadingRow,
@@ -704,7 +704,7 @@ async function removePayment(p, rebuild) {
 function openInvoiceEditor(supplier, inv, onDone) {
   const noInput = el('input.input', { type: 'text', placeholder: 'رقم فاتورة المورد', style: 'direction:ltr;text-align:right' });
   const dateInput = el('input.input', { type: 'date', value: isoDate(inv ? inv.date : new Date()) });
-  const discountInput = el('input.input.input--money', { type: 'number', step: '0.01', min: '0', placeholder: '0' });
+  const discountInput = el('input.input.input--money', { type: 'number', step: '0.01', min: '0', inputmode: 'decimal', placeholder: '0', oninput: (e) => { if (parseFloat(e.target.value) < 0) e.target.value = ''; } });
   const noteInput = el('input.input', { type: 'text', placeholder: 'ملاحظات اختيارية…' });
 
   // How the bill is being settled. Written as a real payment record when money
@@ -750,6 +750,26 @@ function openInvoiceEditor(supplier, inv, onDone) {
   let currency = 'ILS';
   let lines = [];
 
+  /**
+   * What the supplier is already owed in reverse — money we are holding for them.
+   *
+   * Resolved once, when the editor opens, and only excluded from the edit being
+   * made. Counting this invoice's own advance as available to cover itself would
+   * let saving it twice report the same surplus twice.
+   */
+  let advance = 0;
+  advanceAvailable(supplier.id, inv?.id).then((v) => {
+    advance = Math.max(0, Number(v) || 0);
+    if (advance > 0) advanceNote.hidden = false;
+    recalc();
+  });
+  const advanceNote = el(
+    'p.sup-advance-note',
+    { hidden: true },
+    fromHTML(icon('wallet')),
+    el('span', { html: `الرصيد الدائن الحالي <b class="amount">—</b> سيُخصم تلقائياً من هذه الفاتورة.` })
+  );
+
   if (inv) {
     noInput.value = inv.invoiceNo || '';
     dateInput.value = isoDate(inv.date);
@@ -766,8 +786,11 @@ function openInvoiceEditor(supplier, inv, onDone) {
     }
     lines.forEach((ln, i) => {
       const name = el('input.input', { type: 'text', value: ln.name, placeholder: 'اسم الصنف', oninput: (e) => { ln.name = e.target.value; } });
-      const qty = el('input.input', { type: 'number', step: '1', min: '1', value: ln.qty || 1, style: 'text-align:center', oninput: (e) => { ln.qty = Number(e.target.value) || 0; recalc(); } });
-      const price = el('input.input.input--money', { type: 'number', step: '0.01', min: '0', value: ln.price || 0, oninput: (e) => { ln.price = Number(e.target.value) || 0; recalc(); } });
+      // A refused value empties the box instead of sitting there holding a number the
+      // totals do not agree with — the negative is removed where it was typed,
+      // not left for the owner to notice later.
+      const qty = el('input.input', { type: 'number', step: '1', min: '1', inputmode: 'numeric', value: ln.qty || 1, style: 'text-align:center', oninput: (e) => { const v = parseInt(e.target.value || '0', 10); ln.qty = Number.isFinite(v) && v > 0 ? v : 0; if (ln.qty === 0 && e.target.value !== '') e.target.value = ''; recalc(); } });
+      const price = el('input.input.input--money', { type: 'number', step: '0.01', min: '0', inputmode: 'decimal', value: ln.price || 0, oninput: (e) => { const v = parseFloat(e.target.value); ln.price = Number.isFinite(v) && v >= 0 ? v : 0; if (ln.price === 0 && parseFloat(e.target.value) < 0) e.target.value = ''; recalc(); } });
 
       linesHost.appendChild(
         el(
@@ -793,10 +816,20 @@ function openInvoiceEditor(supplier, inv, onDone) {
   const invoiceTotal = () =>
     Math.max(0, lines.reduce((t, l) => t + (Number(l.qty) || 0) * (Number(l.price) || 0), 0) - (Number(discountInput.value) || 0));
 
-  /** The part of the bill actually handed over now, clamped to the bill. */
+  /**
+   * The part of the bill actually handed over now.
+   *
+   * NOT clamped to the bill, and that is the one deliberate exception to the
+   * app-wide "no negative, never exceed" arithmetic. Handing a supplier more
+   * than they asked for is not a mistake: it is an advance, money the shop is
+   * holding for them, and db.createSupplierInvoice turns the surplus into their
+   * credit and spends it on their next bill. Clamping here is what used to
+   * throw that money away — the shop paid it, the books forgot it, and the
+   * supplier was owed for stock they had already been paid for.
+   */
   const paidNow = () => {
     if (payStatus === 'full') return invoiceTotal();
-    if (payStatus === 'partial') return Math.min(invoiceTotal(), Math.max(0, Number(paidInput.value) || 0));
+    if (payStatus === 'partial') return Math.max(0, Number(paidInput.value) || 0);
     return 0;
   };
 
@@ -805,14 +838,29 @@ function openInvoiceEditor(supplier, inv, onDone) {
     const paid = paidNow();
     totalEl.lastElementChild.innerHTML = moneyHTML(total, currency);
 
-    // The three numbers an invoice has to answer, always visible: what it is
-    // worth, how much of it moved, and what is left on the supplier's account.
+    // The numbers an invoice has to answer, always visible: what it is worth,
+    // how much moved now, how much of the supplier's advance is spent on it,
+    // and what is left. Four, because "paid 1200 on a 1000 bill" is two
+    // different things and printing one number for it is how the surplus gets
+    // mistaken for a discount.
     clear(settledEl);
+    const shortfall = Math.max(0, total - paid);
+    const covered = Math.min(advance, shortfall);
+    const owed = shortfall - covered;
+    // Whatever is handed over beyond what the bill (and the advance) needed
+    // stays with the supplier and is spent on their next bill.
+    const surplus = Math.max(0, paid - Math.max(0, total - advance));
     settledEl.appendChild(
       el('div.stmt-settle__grid', {},
         el('div.stmt-cell', {}, el('span.tiny.muted', { text: 'إجمالي الفاتورة' }), el('b', { html: moneyHTML(total, currency) })),
-        el('div.stmt-cell', {}, el('span.tiny.muted', { text: 'المدفوع' }), el('b', { html: moneyHTML(paid, currency) })),
-        el('div.stmt-cell.is-owed', {}, el('span.tiny.muted', { text: 'المتبقي للمورد' }), el('b', { html: moneyHTML(total - paid, currency) })))
+        el('div.stmt-cell', {}, el('span.tiny.muted', { text: 'المدفوع الآن' }), el('b', { html: moneyHTML(paid, currency) })),
+        advance > 0
+          ? el('div.stmt-cell.is-credit', {}, el('span.tiny.muted', { text: 'يُخصم من رصيد المورد' }), el('b', { html: moneyHTML(covered, currency) }))
+          : null,
+        surplus > 0.004
+          ? el('div.stmt-cell.is-credit', {}, el('span.tiny.muted', { text: 'رصيد دائن للمورد' }), el('b', { html: moneyHTML(surplus, currency) }))
+          : null,
+        el('div.stmt-cell.is-owed', {}, el('span.tiny.muted', { text: 'المتبقي للمورد' }), el('b', { html: moneyHTML(owed, currency) })))
     );
   }
 
@@ -833,6 +881,7 @@ function openInvoiceEditor(supplier, inv, onDone) {
     linesHost,
     el('div.field', {}, el('label.field__label', { text: 'خصم على الفاتورة' }), discountInput),
     el('div.field', {}, el('label.field__label', {}, el('span', { text: 'حالة السداد' }), el('span.field__hint', { text: 'ما الذي سيُدفع من الفاتورة الآن' })), statusHost, paidField, statusHint),
+    advanceNote,
     el('div.field', {}, el('label.field__label', { text: 'ملاحظات' }), noteInput),
     totalEl,
     settledEl,
@@ -867,8 +916,9 @@ function openInvoiceEditor(supplier, inv, onDone) {
     const date = new Date(dateInput.value || Date.now()).toISOString();
     const paid = Math.round(paidNow() * 100) / 100;
 
+    let invoiceId = inv?.id;
     try {
-      const invoiceId = await createSupplierInvoice({
+      invoiceId = await createSupplierInvoice({
         id: inv?.id,
         supplierId: supplier.id,
         invoiceNo: noInput.value.trim(),
@@ -880,9 +930,12 @@ function openInvoiceEditor(supplier, inv, onDone) {
         paid,
       });
 
-      // The money that actually moved is a real payment row, so the supplier
-      // balance and the statement both read it without any special-casing.
-      // On an edit that row already exists and is REPLACED — saving the same
+      // Only the money that ACTUALLY moved is a payment row. The advance the
+      // supplier already had is spent by db.createSupplierInvoice inside the
+      // bill's own `paid` field — writing a payment row for it too would deduct
+      // the same money twice and leave the balance wrongly positive.
+      //
+      // On an edit that row already exists and is REPLACED: saving the same
       // invoice twice must never pay it twice.
       if (inv?.id) {
         const stale = (await listSupplierPayments()).filter((p) => p.invoiceId === inv.id);
@@ -906,11 +959,18 @@ function openInvoiceEditor(supplier, inv, onDone) {
 
     m.close();
     onDone && onDone();
-    const left = Math.round((invoiceTotal() - paid) * 100) / 100;
-    toast(
-      left > 0 ? `تم تسجيل الفاتورة — المتبقي للمورد ${left}` : 'تم تسجيل الفاتورة وتسديدها',
-      'ok'
-    );
+
+    // Report what actually happened, from the numbers as saved — including the
+    // advance that was applied and any surplus that became the supplier's credit.
+    const left = Math.max(0, Math.round((invoiceTotal() - paid) * 100) / 100);
+    const surplus = Math.round(Math.max(0, paid - Math.max(0, invoiceTotal() - advance)) * 100) / 100;
+    if (surplus > 0.004) {
+      toast(`تم تسجيل الفاتورة — رصيد دائن للمورد ${num(surplus)} ${currency} سيُخصم من فاتورته القادمة`, 'ok');
+    } else if (left > 0) {
+      toast(`تم تسجيل الفاتورة — المتبقي للمورد ${num(left)} ${currency}`, 'ok');
+    } else {
+      toast('تم تسجيل الفاتورة وتسديدها', 'ok');
+    }
   }
 }
 
@@ -943,10 +1003,28 @@ function openPaymentEditor(supplier, pay, onDone) {
   if (pay) amount.value = pay.amount || '';
   if (pay) noteInput.value = pay.note || '';
 
+  // The supplier's ledger, loaded once so the note below the amount can say what
+  // this payment actually does to the balance — including making it a credit.
+  // The dialog does not wait for it: it opens at once and the note fills in when
+  // the read lands, which is a frame the owner never notices.
+  let owedNow = 0;
+let currency = 'ILS';
+Promise.all([listSupplierInvoices(), listSupplierPayments(), getSettings()]).then(
+    ([invoicesOf, paymentsOf, setOf]) => {
+      currency = setOf.currency || 'ILS';
+      owedNow = Math.max(0, supplierBalance(supplier, invoicesOf, paymentsOf).remaining);
+      paintEffect();
+    }
+  );
+
+  const effectValue = el('span');
+  const effectNote = el('p.sup-advance-note', { hidden: true }, fromHTML(icon('wallet')), effectValue);
+
   const body = el(
     'div',
     {},
     el('div.field', {}, el('label.field__label', {}, el('span', { text: 'المبلغ المدفوع' }), el('span.req', { text: '*' })), amount),
+    effectNote,
     el('div.field', {}, el('label.field__label', { text: 'التاريخ' }), dateInput),
     el('div.field', {}, el('label.field__label', { text: 'طريقة الدفع' }), seg),
     el('div.field', {}, el('label.field__label', { text: 'ملاحظات' }), noteInput)
@@ -964,8 +1042,36 @@ function openPaymentEditor(supplier, pay, onDone) {
 
   setTimeout(() => amount.focus(), 60);
 
+  /**
+ * What the supplier already has in hand, before this payment.
+ *
+ * Shown live under the amount box because this is the one place the surplus is
+ * created: paying 1200 against a 1000 bill is 200 of the supplier's money in
+ * our pocket, and the owner should see that said plainly rather than find it
+ * later in a balance.
+ */
+  function paintEffect() {
+    const v = Math.max(0, Number(amount.value) || 0);
+    if (!v) {
+      effectNote.hidden = true;
+      return;
+    }
+    effectNote.hidden = false;
+    effectValue.innerHTML = v > owedNow
+      ? `المتبقي للمورد <b>${num(v - owedNow)}</b> ${escapeHTML(currency)} <span class="muted">· سيُسجَّل كرصيد دائن له ويُخصم تلقائياً من فاتورته القادمة</span>`
+      : `المتبقي للمورد <b>${num(Math.max(0, owedNow - v))}</b> ${escapeHTML(currency)}`;
+  }
+
+  amount.addEventListener('input', () => {
+    // Refuse a negative in the box, visibly: the field empties rather than
+    // holding a number that would be recorded as a payment in the other
+    // direction.
+    if (parseFloat(amount.value) < 0) amount.value = '';
+    paintEffect();
+  });
+
   async function save() {
-    const v = Math.abs(Number(amount.value) || 0);
+    const v = Math.max(0, Number(amount.value) || 0);
     if (v <= 0) {
       toast('أدخل مبلغاً أكبر من صفر', 'warn');
       amount.focus();
@@ -974,6 +1080,8 @@ function openPaymentEditor(supplier, pay, onDone) {
     await createSupplierPayment({
       id: pay?.id,
       supplierId: supplier.id,
+      // Deliberately NOT capped at what is owed: overpaying a supplier is an
+      // advance, not an error (db.createSupplierPayment documents why).
       amount: v,
       method,
       date: new Date(dateInput.value || Date.now()).toISOString(),
@@ -981,7 +1089,9 @@ function openPaymentEditor(supplier, pay, onDone) {
     });
     m.close();
     onDone && onDone();
-    toast(pay ? 'تم تحديث الدفعة' : 'تم تسجيل الدفعة', 'ok');
+    toast(v > owedNow
+      ? `تم تسجيل الدفعة — رصيد دائن للمورد ${num(v - owedNow)} ${currency}`
+      : pay ? 'تم تحديث الدفعة' : 'تم تسجيل الدفعة', 'ok');
   }
 }
 
@@ -993,7 +1103,7 @@ function openEditor(id, onDone) {
   const nameInput = el('input.input', { type: 'text', placeholder: 'اسم المورد' });
   const phoneInput = el('input.input', { type: 'tel', inputmode: 'tel', placeholder: '05xxxxxxxx', class: 'input ltr', style: 'text-align:right' });
   const notesInput = el('textarea.textarea', { placeholder: 'ملاحظات اختيارية…', style: 'min-height:70px' });
-  const openingInput = el('input.input.input--money', { type: 'number', step: '0.01', placeholder: '0' });
+  const openingInput = el('input.input.input--money', { type: 'number', step: '0.01', min: '0', inputmode: 'decimal', placeholder: '0', oninput: (e) => { if (parseFloat(e.target.value) < 0) e.target.value = ''; } });
 
   const nameField = el('div.field', {}, el('label.field__label', {}, el('span', { text: 'الاسم' }), el('span.req', { text: '*' })), nameInput, el('div.field__error', {}, fromHTML(icon('alertCircle')), el('span', { text: 'الاسم مطلوب' })));
   const phoneField = el('div.field', {}, el('label.field__label', { text: 'رقم الجوال' }), phoneInput, el('div.field__error', {}, fromHTML(icon('alertCircle')), el('span', { text: 'رقم غير صالح' })));

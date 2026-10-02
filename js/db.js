@@ -52,6 +52,30 @@ export const STORES = {
   settings: 'settings',
 };
 
+/* ------------------------------------------------------------------ *
+ * Number guards
+ *
+ * Every number this app stores is a count, a price or an amount — none of
+ * them can be negative, and none of them can be NaN. `min="0"` in the UI is a
+ * convenience for the typist, not a guarantee: a stray minus sign, a paste from
+ * a spreadsheet, a restored backup from another app, or a call site that never
+ * went near a form can all produce one. So the rule is enforced HERE, at the
+ * only place a record is actually written.
+ *
+ * The ONE deliberate exception is a supplier being paid more than they asked
+ * for — that surplus is not an error, it is money the shop is holding for them,
+ * and `supplierBalance()` accounts for it as credit.
+ * ------------------------------------------------------------------ */
+
+/** Any finite number at or above `min`. Garbage in → `min`, never NaN. */
+export const nonNeg = (v, min = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= min ? n : min;
+};
+
+/** A whole number of pieces at or above `min` (stock is never fractional). */
+export const nonNegInt = (v, min = 0) => Math.round(nonNeg(v, min));
+
 let dbPromise = null;
 
 /** Opens (and upgrades) the database; resolves once, shared by the whole app. */
@@ -239,9 +263,17 @@ export function saveProduct(product) {
     sku: product.sku || '',
     category: product.category || 'غير مصنف',
     description: product.description || '',
-    price: Number(product.price) || 0,
-    costPrice: Number(product.costPrice) || 0,
-    variants: product.variants || [],
+    price: nonNeg(product.price),
+    costPrice: nonNeg(product.costPrice),
+    // Variants are rebuilt rather than passed through: a negative quantity on
+    // one size would make "نفذت" lie and would let a sale hand back stock that
+    // was never there.
+    variants: (product.variants || []).map((v) => ({
+      ...v,
+      size: v.size || '',
+      color: v.color || '',
+      quantity: nonNegInt(v.quantity),
+    })),
     image: product.image || '',
     createdAt: product.createdAt || now,
     updatedAt: now,
@@ -306,18 +338,18 @@ export function createPurchase(po) {
     .map((l) => ({
       size: l.size || '',
       color: l.color || '',
-      qty: Math.max(0, Math.round(Number(l.qty) || 0)),
+      qty: nonNegInt(l.qty),
     }))
     .filter((l) => l.qty > 0);
 
   if (!po.productId) return Promise.reject(new Error('لا يوجد منتج محدد'));
   if (!lines.length) return Promise.reject(new Error('الكمية يجب أن تكون أكبر من صفر'));
 
-  const unitCost = Math.max(0, Number(po.unitCost) || 0);
+  const unitCost = nonNeg(po.unitCost);
   const newPrice =
     po.newPrice === undefined || po.newPrice === null || po.newPrice === ''
       ? null
-      : round2(Math.max(0, Number(po.newPrice) || 0));
+      : round2(nonNeg(po.newPrice));
 
   // The money half is written INSIDE the transaction, after the stock half has
   // resolved which variants actually exist. Billing the requested lines instead
@@ -473,18 +505,24 @@ export const listSales = () => getAll(STORES.sales);
  */
 export function createSale(sale) {
   const id = sale.id || cryptoId();
-  const items = sale.items.map((it) => ({
-    productId: it.productId,
-    name: it.name,
-    size: it.size,
-    color: it.color,
-    qty: Number(it.qty) || 0,
-    price: Number(it.price) || 0,
-    costPrice: Number(it.costPrice) || 0,
-  }));
+  // A line with no pieces is not a line: keeping it would put a 0-quantity,
+  // 0-total row on the receipt and on the profit report. A line whose
+  // quantity was typed as a negative is dropped for the same reason — it is
+  // not a return, refunds go through refundSale().
+  const items = (sale.items || [])
+    .map((it) => ({
+      productId: it.productId,
+      name: it.name,
+      size: it.size,
+      color: it.color,
+      qty: nonNegInt(it.qty),
+      price: nonNeg(it.price),
+      costPrice: nonNeg(it.costPrice),
+    }))
+    .filter((it) => it.qty > 0);
 
   const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
-  const discountValue = Number(sale.discountValue) || 0;
+  const discountValue = nonNeg(sale.discountValue);
   const discount =
     sale.discountType === 'percent'
       ? round2((subtotal * Math.min(discountValue, 100)) / 100)
@@ -571,19 +609,21 @@ export function updateSale(saleId, patch) {
       const old = req.result;
       if (!old) return;
 
-      const items = (patch.items || old.items || []).map((it) => ({
-        productId: it.productId,
-        name: it.name,
-        size: it.size,
-        color: it.color,
-        qty: Math.max(0, Number(it.qty) || 0),
-        price: Number(it.price) || 0,
-        costPrice: Number(it.costPrice) || 0,
-      }));
+      const items = (patch.items || old.items || [])
+        .map((it) => ({
+          productId: it.productId,
+          name: it.name,
+          size: it.size,
+          color: it.color,
+          qty: nonNegInt(it.qty),
+          price: nonNeg(it.price),
+          costPrice: nonNeg(it.costPrice),
+        }))
+        .filter((it) => it.qty > 0);
 
       const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
       const discountType = patch.discountType || old.discountType || 'fixed';
-      const discountValue = patch.discountValue === undefined ? old.discountValue : Number(patch.discountValue) || 0;
+      const discountValue = nonNeg(patch.discountValue === undefined ? old.discountValue : patch.discountValue);
       const discount =
         discountType === 'percent'
           ? round2((subtotal * Math.min(discountValue, 100)) / 100)
@@ -709,7 +749,7 @@ export function saveSupplier(s) {
     notes: s.notes || '',
     // What we already owed this supplier before the app started tracking
     // invoices — their opening credit line.
-    openingBalance: Number(s.openingBalance) || 0,
+    openingBalance: nonNeg(s.openingBalance),
     createdAt: s.createdAt || now,
     updatedAt: now,
   });
@@ -743,28 +783,57 @@ export const listSupplierInvoices = () => getAll(STORES.supplierInvoices);
 export const listSupplierPayments = () => getAll(STORES.supplierPayments);
 
 /**
- * Records a supplier bill. A single transaction, and *only* the invoice store
- * is opened — there is no product store in the list, which makes it structurally
- * impossible for this to move stock.
+ * Records a supplier bill.
+ *
+ * A single write, and *only* the invoice store is touched — there is no product
+ * store involved, which makes it structurally impossible for this to move
+ * stock.
+ *
+ * ── The one place a number may exceed what it "should" ────────────────
+ * Paying a supplier MORE than their bill is not a mistake, it is an advance:
+ * the shop is holding their money and will deduct it from their next bill. So
+ * `paid` is deliberately NOT clamped to the total. Whatever the supplier
+ * already had in hand is applied to this bill automatically (`advance`), so the
+ * shop does not have to remember to do it by hand, and only the money that
+ * actually moves is written to `supplierPayments` — an advance being spent is
+ * not a second payment.
+ *
+ * When editing an invoice, that invoice's own effect is left out of the advance
+ * calculation. Otherwise saving it twice would re-apply its coverage and the
+ * bill would look paid twice over.
  *
  * @param {object} inv
  * @param {string} inv.supplierId
  * @param {string} [inv.invoiceNo]  the supplier's own printed number
  * @param {Array}  inv.items        [{name, qty, price}] — free text, not SKUs
- * @param {string} [inv.payStatus]   'carried' | 'partial' | 'full'
- * @param {number} [inv.paid]        how much of the bill moved at once
+ * @param {string} [inv.payStatus]   'carried' | 'partial' | 'full' | 'advance'
+ * @param {number} [inv.paid]        money handed over NOW (may exceed the bill)
  */
-export function createSupplierInvoice(inv) {
+export async function createSupplierInvoice(inv) {
   const items = (inv.items || [])
     .map((it) => ({
       name: String(it.name || '').trim(),
-      qty: Number(it.qty) || 0,
-      price: Number(it.price) || 0,
+      qty: nonNegInt(it.qty),
+      price: nonNeg(it.price),
     }))
     .filter((it) => it.name && it.qty > 0);
 
   const subtotal = round2(items.reduce((t, it) => t + it.qty * it.price, 0));
-  const total = round2(subtotal - (Number(inv.discount) || 0));
+  const discount = round2(Math.min(nonNeg(inv.discount), subtotal));
+  const total = round2(Math.max(0, subtotal - discount));
+
+  const nowPaid = round2(nonNeg(inv.paid));
+  const held = await advanceAvailable(inv.supplierId, inv.id);
+  // What the bill actually CONSUMES of the credit, which is never more than the
+  // bill itself: a 250 bill spends 250 of a 1500 advance and leaves 1250 for the
+  // next one. Recording the whole held figure here would make the statement claim
+  // a 250 bill had been covered by 1500.
+  const advance = round2(Math.min(held, total));
+
+  // What this bill ends up covered by: the money handed over now plus whatever
+  // of the supplier's own money we were already holding. `paid` can read above
+  // the total — that surplus is our credit and the next bill spends it.
+  const paid = round2(nowPaid + advance);
 
   const record = {
     id: inv.id || cryptoId(),
@@ -774,13 +843,18 @@ export function createSupplierInvoice(inv) {
     items,
     subtotal,
     // A discount the supplier granted on the whole bill.
-    discount: round2(Math.min(Number(inv.discount) || 0, subtotal)),
+    discount,
     total,
     // How the bill was settled when it was written down. The money itself lives
     // in `supplierPayments`, so the balance never has to read this — it is here
     // so the invoice and the statement can say what happened without guessing.
     payStatus: inv.payStatus || 'carried',
-    paid: round2(Math.min(Math.max(0, Number(inv.paid) || 0), total)),
+    paid,
+    // Split out so the statement can say "X of this was covered by the advance
+    // you already had" without redoing the arithmetic. `surplus` is the part of
+    // the surplus that did NOT cover this bill and is still ours to hold.
+    advance,
+    surplus: round2(Math.max(0, paid - total)),
     note: inv.note || '',
     createdAt: new Date().toISOString(),
   };
@@ -788,14 +862,55 @@ export function createSupplierInvoice(inv) {
   return put(STORES.supplierInvoices, record);
 }
 
+/**
+ * How much of the supplier's money is already in our hands and unspent.
+ *
+ * Read-only, so it costs nothing and changes no schema: the surplus is simply
+ * a negative running balance, which supplierBalance() already computes.
+ *
+ * @param {string} supplierId
+ * @param {string} [excludeInvoiceId]  ignored while editing — see the note above
+ * @returns {Promise<number>} never negative
+ */
+export async function advanceAvailable(supplierId, excludeInvoiceId) {
+  if (!supplierId) return 0;
+  const [suppliers, invoices, payments] = await Promise.all([
+    listSuppliers(),
+    listSupplierInvoices(),
+    listSupplierPayments(),
+  ]);
+  const s = suppliers.find((x) => x.id === supplierId);
+  if (!s) return 0;
+  const b = supplierBalance(
+    s,
+    invoices.filter((r) => r.id !== excludeInvoiceId),
+    payments
+  );
+  return round2(Math.max(0, -b.remaining));
+}
+
 export const deleteSupplierInvoice = (id) => del(STORES.supplierInvoices, id);
 
-/** Records money paid *to* a supplier. */
+/**
+ * Records money paid *to* a supplier.
+ *
+ * There is deliberately no ceiling: paying more than the bill is allowed, and
+ * the surplus becomes the supplier's credit with us (see createSupplierInvoice).
+ * There is still no floor below zero — a "negative payment" is a payment in the
+ * other direction, which is an invoice, not a payment — and it is refused
+ * outright rather than written as a zero, for the same reason createPurchase
+ * refuses a zero-quantity restock: a row that settles nothing is not a record.
+ *
+ * @throws {Error} when `amount` is not above zero
+ */
 export function createSupplierPayment(p) {
+  const amount = round2(nonNeg(p.amount));
+  if (amount <= 0) return Promise.reject(new Error('مبلغ الدفعة يجب أن يكون أكبر من صفر'));
+
   const record = {
     id: p.id || cryptoId(),
     supplierId: p.supplierId,
-    amount: round2(Math.abs(Number(p.amount) || 0)),
+    amount,
     method: p.method || 'cash',
     date: p.date || new Date().toISOString(),
     // Optional: ties the payment to one invoice, for the statement view.
@@ -811,20 +926,25 @@ export const deleteSupplierPayment = (id) => del(STORES.supplierPayments, id);
 /**
  * Rolls a supplier's whole ledger into the numbers the UI shows.
  *
- * remaining = openingBalance + Σ invoices − Σ payments
+ *   remaining = openingBalance + Σ invoices − Σ payments
  *
- * Positive → we still owe them. Negative → they are in advance to us.
+ * One number, two meanings, split out here so no screen has to guess:
+ *   owed    > 0  → we still owe them
+ *   credit  > 0  → they are in advance to us, and the next bill spends it
  */
 export function supplierBalance(supplier, invoices, payments) {
   const mine = (rows) => (rows || []).filter((r) => r.supplierId === supplier.id);
   const billed = mine(invoices).reduce((t, r) => t + (r.total || 0), 0);
   const paid = mine(payments).reduce((t, r) => t + (r.amount || 0), 0);
-  const opening = Number(supplier.openingBalance) || 0;
+  const opening = nonNeg(supplier.openingBalance);
+  const remaining = round2(opening + billed - paid);
   return {
-    opening,
+    opening: round2(opening),
     billed: round2(billed),
     paid: round2(paid),
-    remaining: round2(opening + billed - paid),
+    remaining,
+    owed: round2(Math.max(0, remaining)),
+    credit: round2(Math.max(0, -remaining)),
   };
 }
 
@@ -842,8 +962,19 @@ export function allSupplierBalances(suppliers, invoices, payments) {
     (suppliers || []).map((s) => {
       const b = round2((billed.get(s.id) || 0));
       const p = round2((paid.get(s.id) || 0));
-      const opening = Number(s.openingBalance) || 0;
-      return [s.id, { opening, billed: b, paid: p, remaining: round2(opening + b - p) }];
+      const opening = nonNeg(s.openingBalance);
+      const remaining = round2(opening + b - p);
+      return [
+        s.id,
+        {
+          opening: round2(opening),
+          billed: b,
+          paid: p,
+          remaining,
+          owed: round2(Math.max(0, remaining)),
+          credit: round2(Math.max(0, -remaining)),
+        },
+      ];
     })
   );
 }
@@ -900,10 +1031,21 @@ export async function getSettings() {
  * The currency is not a preference: this app is priced in shekels and the
  * settings screen no longer offers a choice. Forcing it here means a stale
  * backup or an old call site cannot reintroduce another symbol.
+ *
+ * `openingBalance` and `lowStockThreshold` are clamped for the same reason the
+ * rest of the app is: they are numbers, and a negative opening balance would
+ * print a negative store balance on the dashboard.
  */
 export function saveSettings(patch) {
   return getSettings().then((cur) =>
-    put(STORES.settings, { ...cur, ...patch, key: 'app', currency: 'ILS' })
+    put(STORES.settings, {
+      ...cur,
+      ...patch,
+      openingBalance: nonNeg(patch.openingBalance === undefined ? cur.openingBalance : patch.openingBalance),
+      lowStockThreshold: nonNegInt(patch.lowStockThreshold === undefined ? cur.lowStockThreshold : patch.lowStockThreshold),
+      key: 'app',
+      currency: 'ILS',
+    })
   );
 }
 
@@ -975,20 +1117,104 @@ export async function importAll(data) {
   await multiTx(restores, 'readwrite', (store) => {
     for (const s of restores) store(s).clear();
 
-    for (const p of data.products || []) store(STORES.products).put(p);
+    for (const p of data.products || []) {
+      store(STORES.products).put({
+        ...p,
+        price: nonNeg(p.price),
+        costPrice: nonNeg(p.costPrice),
+        variants: (p.variants || []).map((v) => ({ ...v, quantity: nonNegInt(v.quantity) })),
+      });
+    }
     // A backup written by an older build still carries customerId/customerName
     // on its sales. The v3 migration already ran, so nothing upstream would
     // strip them again - drop them here or a legacy restore quietly brings the
     // whole customers feature back from the dead.
     for (const s of data.sales || []) {
       const { customerId, customerName, ...rest } = s;
-      store(STORES.sales).put(rest);
+      // A file is untrusted input as far as arithmetic goes. A well-formed
+      // backup round-trips untouched; one carrying a negative quantity or price
+      // (hand-edited, or written by a build without the guards) is corrected on
+      // the way in rather than loaded as-is. The three totals are rebuilt from
+      // the corrected lines rather than merely floored, so the arithmetic of a
+      // restored invoice can never contradict its own lines.
+      const items = (rest.items || [])
+        .map((it) => ({
+          ...it,
+          qty: nonNegInt(it.qty),
+          price: nonNeg(it.price),
+          costPrice: nonNeg(it.costPrice),
+        }))
+        .filter((it) => it.qty > 0);
+      const sub = round2(items.reduce((t, it) => t + it.qty * it.price, 0));
+      const dType = rest.discountType || 'fixed';
+      const dVal = nonNeg(rest.discountValue);
+      const disc = round2(
+        dType === 'percent'
+          ? (sub * Math.min(dVal, 100)) / 100
+          : Math.min(round2(dVal), sub)
+      );
+      store(STORES.sales).put({
+        ...rest,
+        items,
+        subtotal: sub,
+        discount: disc,
+        total: round2(sub - disc),
+        costTotal: round2(items.reduce((t, it) => t + it.qty * it.costPrice, 0)),
+      });
     }
-    for (const p of data.purchases || []) store(STORES.purchases).put(p);
-    for (const s of data.suppliers || []) store(STORES.suppliers).put(s);
-    for (const s of data.supplierInvoices || []) store(STORES.supplierInvoices).put(s);
-    for (const s of data.supplierPayments || []) store(STORES.supplierPayments).put(s);
-    store(STORES.settings).put({ ...DEFAULT_SETTINGS, ...(data.settings || {}), key: 'app', currency: 'ILS' });
+    for (const p of data.purchases || []) {
+      store(STORES.purchases).put({
+        ...p,
+        unitCost: nonNeg(p.unitCost),
+        units: nonNegInt(p.units),
+        total: nonNeg(p.total),
+      });
+    }
+    for (const s of data.suppliers || []) {
+      store(STORES.suppliers).put({ ...s, openingBalance: nonNeg(s.openingBalance) });
+    }
+    for (const s of data.supplierInvoices || []) {
+      // Same story as sales: rebuild the money from the corrected lines, and keep
+      // `paid` as it was recorded — a supplier invoice is the one record where a
+      // figure may legitimately sit above the bill, because that surplus is the
+      // advance the shop is holding for them.
+      const items = (s.items || [])
+        .map((it) => ({
+          name: String(it.name || '').trim(),
+          qty: nonNegInt(it.qty),
+          price: nonNeg(it.price),
+        }))
+        .filter((it) => it.name && it.qty > 0);
+      const sub = round2(items.reduce((t, it) => t + it.qty * it.price, 0));
+      const discount = round2(Math.min(nonNeg(s.discount), sub));
+      const total = round2(Math.max(0, sub - discount));
+      const paid = round2(Math.max(0, nonNeg(s.paid)));
+      store(STORES.supplierInvoices).put({
+        ...s,
+        items,
+        subtotal: sub,
+        discount,
+        total,
+        paid,
+        surplus: round2(Math.max(0, paid - total)),
+      });
+    }
+    for (const s of data.supplierPayments || []) {
+      // A payment of zero or less is not a payment; loading one would add a row
+      // to the ledger that settles nothing.
+      const amount = round2(nonNeg(s.amount));
+      if (amount > 0) store(STORES.supplierPayments).put({ ...s, amount });
+    }
+    // A restored file is untrusted input as far as arithmetic goes: clamp the
+    // settings numbers on the way in, exactly as saveSettings does.
+    const restored = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+    store(STORES.settings).put({
+      ...restored,
+      openingBalance: nonNeg(restored.openingBalance),
+      lowStockThreshold: nonNegInt(restored.lowStockThreshold),
+      key: 'app',
+      currency: 'ILS',
+    });
   });
 }
 

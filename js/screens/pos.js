@@ -1,35 +1,38 @@
 /**
- * Sales / POS — pick products, build a cart, apply a discount, take a
- * (labelled) payment method and complete the sale.
+ * Sales / POS — pick products and put them in the cart.
  *
- * Stock is decremented atomically by `createSale()` in db.js.
+ * That is all this screen does now. It used to own the cart as well: a
+ * "الطلب الحالي" column beside the grid, carrying its own copy of the line
+ * list, its own totals, its own discount box, its own payment buttons and its
+ * own checkout button. Two copies of one invoice is two numbers to keep in step
+ * and, eventually, two different answers to "what does this cost".
+ *
+ * So the column is gone. The cart panel (cart-bar.js) is the single place the
+ * current order exists — pieces, size, colour, quantity, unit price, line
+ * total, discount, payment method and the button that finishes the sale — and
+ * the basket itself lives in ../cart-store.js, which this screen writes to and
+ * the panel reads from. The shared `addLine()` is what puts a piece in, so the
+ * quantity and price rules are enforced in one place.
+ *
+ * Stock is decremented atomically by `createSale()` in db.js, once the owner has
+ * confirmed the sale in the panel.
  *
  * Route: `#/pos` or `#/pos/<productId>` (the latter pre-loads one product —
  * used by the quick "+" button on product cards).
  */
 import { icon } from '../icons.js';
 import {
-  el, fromHTML, clear, escapeHTML, num, numInt, moneyHTML, uid,
-  flyTo, nudge, debounce, confetti, downloadText, fmtDate, fmtTime, dayKeyOf,
+  el, fromHTML, clear, escapeHTML, numInt, moneyHTML,
+  flyTo, debounce,
 } from '../utils.js';
-import { printPage, shareText } from '../native.js';
 import {
-  listProducts, getSettings, createSale,
+  listProducts, getSettings,
   stockOf, availableVariants, variantStock,
 } from '../db.js';
-import { emptyState, openSheet, openModal, celebrate, confirmDialog, toast } from '../components.js';
+import { emptyState, openSheet, toast } from '../components.js';
 import { scanBarcode, reportMissing } from '../scanner.js';
 import { navigate } from '../router.js';
-import {
-  cart, discount, subtotal, discountAmount, grandTotal, totalItems, lineCount,
-  getPaymentMethod, setPaymentMethod, getLastSale, setLastSale, clearCart, emit, subscribe,
-} from '../cart-store.js';
-
-const PAYMENTS = [
-  { id: 'cash', label: 'نقداً', icon: 'cash' },
-  { id: 'card', label: 'بطاقة', icon: 'card' },
-  { id: 'transfer', label: 'تحويل', icon: 'transfer' },
-];
+import { addLine, totalItems, subscribe } from '../cart-store.js';
 
 let query = '';
 let category = 'all';
@@ -88,23 +91,34 @@ export function render(params = []) {
     el('div', { id: 'pos-products' })
   );
 
-  const right = el('div.pos__cart', { id: 'pos-cart' });
+  root.appendChild(el('div.pos', {}, left));
 
-  root.appendChild(el('div.pos', {}, left, right));
-
-  // The sticky cart bar mutates the shared store from other screens; this keeps
-  // the POS column in step with it. Only the column is repainted here — calling
-  // paintCart() would emit again and loop.
-  const stopWatching = subscribe(repaintPos);
+  // The badge is the only cart affordance this screen keeps: a piece count, so
+  // the owner can tell at a glance that a tap registered. It deliberately does
+  // NOT open the cart — the panel does that, from the topbar button and from the
+  // bar at the bottom, and a second opener would just be another way for the two
+  // views to disagree about what is in the invoice.
+  const stopWatching = subscribe(() => {
+    const badge = document.getElementById('pos-count');
+    if (!badge) return;
+    const n = totalItems();
+    badge.textContent = n ? `${n} قطعة` : 'السلة فارغة';
+    badge.classList.toggle('is-live', n > 0);
+  });
 
   paintProducts(root);
-  // The router only appends the screen to #view *after* render() returns, so
-  // #pos-cart is not in the document yet and repaintPos() would bail on its
-  // `if (!host) return` guard. Calling it here meant every visit to POS painted
-  // an empty cart column and a "سلة فارغة" badge even when the shared cart held
-  // lines — the sticky bar was right and this column was wrong. One frame later
-  // the screen is mounted, so repaint now.
-  requestAnimationFrame(repaintPos);
+  // The router only appends the screen to #view *after* render() returns, so the
+  // badge is not in the document yet. One frame later the screen is mounted, so
+  // paint the count now rather than showing "السلة فارغة" for a cart that is
+  // not.
+  requestAnimationFrame(() => {
+    const badge = document.getElementById('pos-count');
+    if (badge) {
+      const n = totalItems();
+      badge.textContent = n ? `${n} قطعة` : 'السلة فارغة';
+      badge.classList.toggle('is-live', n > 0);
+    }
+  });
   activeScreens.push(stopWatching);
 
   // pre-select a product when arriving from a product card
@@ -536,490 +550,59 @@ async function handleScan() {
   pickProduct(hit);
 }
 
+/**
+ * Puts a piece in the cart.
+ *
+ * The line itself is built and normalised by `addLine()` in cart-store.js, which
+ * is where the quantity ceiling (the variant's real stock) and the "never
+ * negative" rules live — this function only knows which product and which
+ * variant, and which of the two outcomes to tell the owner about.
+ */
 function addItem(product, variant) {
   const key = `${product.id}|${variant.size}|${variant.color}`;
-  const existing = cart.find((l) => l.key === key);
-
   const max = Number(variant.quantity) || 0;
-  if (existing) {
-    if (existing.qty >= max) {
-      toast('لا توجد كمية إضافية متاحة', 'warn');
-      return;
-    }
-    existing.qty++;
-  } else {
-    cart.push({
-      key,
-      productId: product.id,
-      name: product.name,
-      image: product.image || '',
-      size: variant.size || '',
-      color: variant.color || '',
-      qty: 1,
-      price: Number(product.price) || 0,
-      costPrice: Number(product.costPrice) || 0,
-      max,
-    });
+  if (!max) {
+    toast('هذه القطعة نافدة من المخزون', 'warn');
+    return;
   }
 
-  // the thumbnail flies to the cart bar when the POS column is off-screen, and
-  // to the column when it is visible
-  const srcEl = document.querySelector('#pos-products .pos-item img') ||
-    document.querySelector('.pcard__media img');
+  const outcome = addLine({
+    key,
+    productId: product.id,
+    name: product.name,
+    image: product.image || '',
+    size: variant.size || '',
+    color: variant.color || '',
+    qty: 1,
+    price: Number(product.price) || 0,
+    costPrice: Number(product.costPrice) || 0,
+    max,
+  });
+
+  // the thumbnail flies to the cart bar, which is the only thing that shows the
+  // basket now
+  const srcEl = document.querySelector('#pos-products .pos-item img');
   const cardEl = [...document.querySelectorAll('#pos-products .pos-item')].find(
     (b) => b.querySelector('.pos-item__name')?.textContent === product.name
   );
-  const target = document.getElementById('pos-cart') ||
-    document.getElementById('cart-bar') ||
-    document.getElementById('pos-count');
+  const target = document.getElementById('cart-bar') || document.getElementById('pos-count');
   flyTo(cardEl || srcEl, target, product.image);
 
-  paintCart('added');
+  if (outcome === 'full') {
+    toast(`لا توجد كمية إضافية — المتاح ${max}`, 'warn');
+    return;
+  }
   toast(`أُضيف: ${product.name}`, 'ok', 1500);
 }
 
 /* ------------------------------------------------------------------ *
- * Cart (right column)
- * ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ *
- * Cart (right column) — totals live in ../cart-store.js so the sticky
- * bar can show the same numbers on every screen.
- * ------------------------------------------------------------------ */
-
-/** Repaints only the POS cart column. Safe to call from anywhere. */
-function repaintPos() {
-  const host = document.getElementById('pos-cart');
-  const badge = document.getElementById('pos-count');
-  if (!host) return;
-
-  const cur = cache.settings?.currency || 'ILS';
-  if (badge) badge.textContent = totalItems() ? `${totalItems()} قطعة` : 'سلة فارغة';
-
-  clear(host);
-
-  const card = el('div.cart');
-  card.appendChild(
-    el(
-      'div.cart__head',
-      {},
-      fromHTML(icon('bag')),
-      el('h3', { text: 'الطلب الحالي' }),
-      el('span.cart__count', { text: `${cart.length} صنف` }),
-      cart.length
-        ? el('button.cart__clear', { type: 'button', text: 'تفريغ', onClick: clearCartAndReport })
-        : null
-    )
-  );
-
-  const items = el('div.cart__items');
-  if (!cart.length) {
-    items.appendChild(
-      emptyState({
-        iconName: 'bag',
-        title: 'السلة فارغة',
-        text: 'اختر منتجاً من القائمة لإضافته هنا.',
-        small: true,
-      })
-    );
-  } else {
-    cart.forEach((line) => items.appendChild(cartLine(line, cur)));
-  }
-  card.appendChild(items);
-
-  if (cart.length) card.appendChild(totalsBlock(cur));
-  else card.appendChild(el('div', { style: 'padding:0 16px 16px' }));
-
-  host.appendChild(card);
-}
-
-/**
- * Every cart change in the POS screen goes through here: repaint the column,
- * then tell the sticky bar. The bar does the mirror image — it mutates the
- * store and lets the subscription below call repaintPos() — so the two views
- * can never drift apart. `reason` lets the bar peek open on a fresh addition.
- */
-function paintCart(reason = '') {
-  repaintPos();
-  emit(reason);
-}
-
-function cartLine(line, cur) {
-  const node = el(
-    'div.citem',
-    {},
-    el(
-      'div.citem__main',
-      {},
-      el('div.citem__name.truncate', { text: line.name }),
-      el(
-        'div.citem__variant',
-        {},
-        line.size ? el('span.size-pill', { style: 'height:21px;min-width:auto;font-size:10.5px', text: line.size }) : null,
-        line.color ? el('span', { text: line.color }) : null,
-        el('span', { text: `× ${line.qty}` })
-      ),
-      el(
-        'div.citem__ctrl',
-        {},
-        el(
-          'div.qty',
-          {},
-          el('button', { type: 'button', 'aria-label': 'إنقاص', onClick: () => changeQty(line, -1) }, fromHTML(icon('minus'))),
-          el('span', { text: String(line.qty) }),
-          el('button', {
-            type: 'button',
-            'aria-label': 'زيادة',
-            disabled: line.qty >= line.max,
-            onClick: () => changeQty(line, 1),
-          }, fromHTML(icon('plus')))
-        ),
-        el('button.citem__del', { type: 'button', 'aria-label': 'حذف', onClick: () => removeLine(line) }, fromHTML(icon('trash')))
-      )
-    ),
-    el('div.citem__line', { html: moneyHTML(line.qty * line.price, cur) })
-  );
-  return node;
-}
-
-function changeQty(line, delta) {
-  const next = line.qty + delta;
-  if (next < 1) return removeLine(line);
-  if (next > line.max) {
-    toast(`المتاح فقط ${line.max} قطعة`, 'warn');
-    return;
-  }
-  line.qty = next;
-  paintCart();
-  nudge(document.querySelector('.totals__grand .amount'));
-}
-
-function removeLine(line) {
-  const node = [...document.querySelectorAll('.citem')].find(
-    (n) => n.querySelector('.citem__name')?.textContent === line.name
-  );
-  const idx = cart.indexOf(line);
-  if (idx > -1) cart.splice(idx, 1);
-
-  if (node) {
-    node.classList.add('is-leaving');
-    node.addEventListener('animationend', () => paintCart(), { once: true });
-    setTimeout(() => paintCart(), 260);
-  } else {
-    paintCart();
-  }
-}
-
-function clearCartAndReport() {
-  clearCart();
-  toast('تم تفريغ السلة');
-}
-
-function totalsBlock(cur) {
-  const sub = subtotal();
-  const disc = discountAmount();
-  const total = grandTotal();
-
-  return el(
-    'div.totals',
-    {},
-    el('div.totals__row', {}, el('span', { text: 'المجموع الفرعي' }), el('span', { html: moneyHTML(sub, cur) })),
-    disc > 0
-      ? el('div.totals__row.totals__row--save', {}, el('span', { text: 'الخصم' }), el('span', { html: `− ${moneyHTML(disc, cur)}` }))
-      : null,
-
-    /* discount entry */
-    el(
-      'div.promo-input',
-      {},
-      fromHTML(icon('percent')),
-      el('input', {
-        type: 'number',
-        min: '0',
-        step: discount.type === 'percent' ? '1' : '0.5',
-        placeholder: discount.type === 'percent' ? 'نسبة %' : 'مبلغ خصم',
-        value: discount.value || '',
-        oninput: debounce((e) => {
-          const v = parseFloat(e.target.value);
-          discount.value = Number.isFinite(v) && v > 0 ? v : 0;
-          paintCart();
-          // the input is recreated by the repaint — restore focus for typing
-          const inp = document.querySelector('.promo-input input');
-          if (inp) {
-            inp.focus({ preventScroll: true });
-            try {
-              inp.setSelectionRange(inp.value.length, inp.value.length);
-            } catch {
-              /* <input type=number> does not support selection */
-            }
-          }
-        }, 220),
-      }),
-      el(
-        'div.seg',
-        {},
-        el('button', {
-          type: 'button',
-          text: cache.settings?.currency || 'ILS',
-          class: discount.type === 'fixed' ? 'is-active' : '',
-          onClick: () => { discount.type = 'fixed'; paintCart(); },
-        }),
-        el('button', {
-          type: 'button',
-          text: '%',
-          class: discount.type === 'percent' ? 'is-active' : '',
-          onClick: () => { discount.type = 'percent'; paintCart(); },
-        })
-      )
-    ),
-
-    /* payment method */
-    el(
-      'div.pay-methods',
-      {},
-      ...PAYMENTS.map((p) =>
-        el(`button.pay-method${getPaymentMethod() === p.id ? '.is-on' : ''}`, {
-          type: 'button',
-          onClick: () => { setPaymentMethod(p.id); paintCart(); },
-        }, fromHTML(icon(p.icon)), el('span', { text: p.label }))
-      )
-    ),
-
-    el(
-      'div.totals__grand',
-      {},
-      el('span', { style: 'font-weight:600;color:var(--ink-2)', text: 'الإجمالي النهائي' }),
-      el('span.amount.amount--lg', { html: moneyHTML(total, cur) })
-    ),
-
-    el(
-      'button.btn.btn--primary.checkout-btn',
-      { type: 'button', onClick: completeSale },
-      fromHTML(icon('receipt')),
-      el('span', { text: 'إتمام الدفع' }),
-      el('b', { html: moneyHTML(total, cur) })
-    )
-  );
-}
-
-/* ------------------------------------------------------------------ *
- * Complete sale + receipt
- * ------------------------------------------------------------------ */
-
-async function completeSale() {
-  if (!cart.length) {
-    toast('السلة فارغة — أضف منتجاً أولاً', 'warn');
-    return;
-  }
-
-  const btn = document.querySelector('.checkout-btn');
-  if (btn) btn.disabled = true;
-
-  try {
-    // guard against stock that changed since the cart was built
-    const products = await listProducts();
-    const byId = new Map(products.map((p) => [p.id, p]));
-    for (const line of cart) {
-      const p = byId.get(line.productId);
-      const available = p ? variantStock(p, line.size, line.color) : 0;
-      if (line.qty > available) {
-        toast(`«${line.name}» متاح ${available} فقط`, 'err');
-        return;
-      }
-    }
-
-    const seq = await seqForToday();
-
-    const sale = await createSale({
-      items: cart.map((l) => ({
-        productId: l.productId,
-        name: l.name,
-        size: l.size,
-        color: l.color,
-        qty: l.qty,
-        price: l.price,
-        costPrice: l.costPrice,
-      })),
-      discountType: discount.type,
-      discountValue: discount.value || 0,
-      paymentMethod: getPaymentMethod(),
-      receiptSeq: seq,
-    });
-
-    setLastSale(sale);
-    const settings = await getSettings();
-
-    await celebrate({
-      title: 'تمت عملية البيع',
-      sub: `فاتورة ${sale.receiptNo} · ${moneyHTML(sale.total, settings.currency)}`,
-      ms: 1400,
-    });
-
-    // reset for the next sale
-    clearCart();
-    setPaymentMethod('cash');
-    invalidateCache();
-
-    // createSale() just rewrote quantities in IndexedDB, so the Inventory screen's
-    // module-level cache is stale too — otherwise walking to المخزن after a sale
-    // shows pre-sale stock. Same dynamic import the product form already uses,
-    // so no static import (and no import cycle) is introduced.
-    import('./products.js').then((m) => m.invalidate()).catch(() => {});
-
-    paintCart();
-    paintProducts();
-    showReceipt(sale, settings);
-  } catch (err) {
-    console.error('[completeSale] error:', err);
-    toast('فشل إتمام البيع: ' + (err.message || err), 'err');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-/** Receipt numbers are sequential within the current day. */
-async function seqForToday() {
-  const all = await import('../db.js').then((m) => m.listSales());
-  // Both sides use the local day: the stored timestamp is UTC, so comparing it
-  // against a UTC "today" would restart the numbering every evening and hand
-  // out a number the shop already used.
-  const day = dayKeyOf(new Date());
-  return all.filter((s) => dayKeyOf(s.timestamp) === day).length;
-}
-
-/* ------------------------------------------------------------------ *
- * Receipt
- * ------------------------------------------------------------------ */
-
-function receiptEl(sale, settings, { forPrint = false } = {}) {
-  const cur = settings.currency;
-  const lines = el(
-    'div.receipt__lines',
-    {},
-    ...sale.items.map((it) =>
-      el(
-        'div.receipt__line',
-        {},
-        el('div.receipt__line-name', {}, el('b', { text: it.name }), el('small', { text: [it.size, it.color].filter(Boolean).join(' · ') || '—' })),
-        el('div.receipt__line-qty', { text: `${it.qty} × ${num(it.price)}` }),
-        el('div.receipt__line-amt', { html: moneyHTML(it.qty * it.price, cur) })
-      )
-    )
-  );
-
-  return el(
-    'div.receipt',
-    {},
-    el(
-      'div.receipt__head',
-      {},
-      settings.logo && settings.receiptShowLogo !== false
-        ? el('img.receipt__logo', { src: settings.logo, alt: '' })
-        : el('div.receipt__logo', { style: 'display:grid;place-items:center;color:#fff', html: icon('hanger') }),
-      el('div.receipt__store', { text: settings.storeName }),
-      el('div.receipt__meta', { text: [settings.address, settings.phone].filter(Boolean).join(' · ') || settings.storeTagline }),
-      el('div.receipt__meta', { text: `${fmtDate(sale.timestamp, true)}` }),
-      el('span.receipt__no', { text: `فاتورة ${sale.receiptNo}` })
-    ),
-    lines,
-    el(
-      'div.receipt__totals',
-      {},
-      el('div.totals__row', {}, el('span', { text: 'المجموع الفرعي' }), el('span', { html: moneyHTML(sale.subtotal, cur) })),
-      sale.discount > 0
-        ? el('div.totals__row.totals__row--save', {}, el('span', { text: 'الخصم' }), el('span', { html: `− ${moneyHTML(sale.discount, cur)}` }))
-        : null,
-      el(
-        'div.totals__row',
-        { style: 'font-size:16px;font-weight:700;color:var(--ink);padding-top:7px' },
-        el('span', { text: 'الإجمالي' }),
-        el('span', { html: moneyHTML(sale.total, cur) })
-      ),
-      el('div.totals__row', {}, el('span', { text: 'طريقة الدفع' }), el('span', { text: PAYMENTS.find((p) => p.id === sale.paymentMethod)?.label || 'نقود' }))
-    ),
-    el('div.receipt__foot', {}, el('span', { text: settings.receiptFooter || 'شكراً لتسوقكم معنا' }), el('div.receipt__barcode'))
-  );
-}
-
-function showReceipt(sale, settings) {
-  const body = el('div', {}, receiptEl(sale, settings));
-
-  const m = openModal({
-    title: `تمت العملية ${sale.receiptNo}`,
-    body,
-    onClose: () => {},
-    foot: [
-      el('button.btn', { type: 'button', onClick: () => shareReceipt(sale, settings) }, fromHTML(icon('share')), el('span', { text: 'مشاركة' })),
-      el('button.btn.btn--soft', { type: 'button', onClick: () => printReceipt(sale, settings) }, fromHTML(icon('printer')), el('span', { text: 'طباعة' })),
-      el('button.btn.btn--primary', { type: 'button', text: 'تم', onClick: () => m.close() }),
-    ],
-  });
-}
-
-function receiptText(sale, settings) {
-  const cur = settings.currency;
-  const pad = (a, b) => `${a}`.padEnd(0);
-  const L = [];
-  L.push(settings.storeName);
-  L.push(`فاتورة: ${sale.receiptNo}`);
-  L.push(`التاريخ: ${fmtDate(sale.timestamp, true)}`);
-  L.push('--------------------------------');
-  for (const it of sale.items) {
-    L.push(`${it.name}`);
-    L.push(`  ${[it.size, it.color].filter(Boolean).join(' · ')}  ${it.qty} × ${num(it.price)} = ${num(it.qty * it.price)} ${cur}`);
-  }
-  L.push('--------------------------------');
-  L.push(`المجموع الفرعي: ${num(sale.subtotal)} ${cur}`);
-  if (sale.discount > 0) L.push(`الخصم: -${num(sale.discount)} ${cur}`);
-  L.push(`الإجمالي: ${num(sale.total)} ${cur}`);
-  L.push(`الدفع: ${PAYMENTS.find((p) => p.id === sale.paymentMethod)?.label || ''}`);
-  L.push('--------------------------------');
-  L.push(settings.receiptFooter || '');
-  return L.join('\n');
-}
-
-async function shareReceipt(sale, settings) {
-  const text = receiptText(sale, settings);
-  const title = `فاتورة ${sale.receiptNo}`;
-
-  // WebView has no Web Share API, so the native sheet goes first there
-  const native = await shareText(title, text);
-  if (native !== 'unavailable') return; // shared, or the user dismissed it
-
-  if (navigator.share) {
-    try {
-      await navigator.share({ title, text });
-      return;
-    } catch (e) {
-      if (e && e.name === 'AbortError') return;
-    }
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('تم نسخ الفاتورة', 'ok');
-  } catch {
-    const saved = await downloadText(text, `receipt-${sale.receiptNo}.txt`);
-    toast(saved ? 'تم تنزيل الفاتورة كنص' : 'تعذّر حفظ الفاتورة', saved ? 'ok' : 'err');
-  }
-}
-
-function printReceipt(sale, settings) {
-  const root = document.getElementById('print-root');
-  clear(root);
-  const wrap = el('div', { style: 'max-width:340px;margin:0 auto' });
-  wrap.appendChild(receiptEl(sale, settings, { forPrint: true }));
-  root.appendChild(wrap);
-  setTimeout(() => printPage().catch((err) => console.warn('[print] failed', err)), 60);
-}
-
-/* ------------------------------------------------------------------ *
- * Reset helper (called when leaving the screen)
+ * Teardown
  * ------------------------------------------------------------------ */
 
 export function destroy() {
-  // keep the cart so an accidental navigation doesn't lose a sale in progress
+  // Keep the cart — an accidental navigation must not lose a sale in progress —
   // but stop listening to the store, or every past POS screen would keep
-  // repainting a column that is no longer on screen
+  // repainting a badge that is no longer on screen.
   while (activeScreens.length) {
     const stop = activeScreens.pop();
     try {

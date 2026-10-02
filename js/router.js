@@ -9,10 +9,7 @@
  * or sub-folder without server rewrites.
  */
 import { icon } from './icons.js';
-import { clear, escapeHTML, fromHTML } from './utils.js';
-import { stockOf } from './db.js';
-// cart-store.js imports nothing, so reading the basket from here adds no cycle.
-import { totalItems, isPanelOpen, setPanelOpen } from './cart-store.js';
+import { clear, escapeHTML } from './utils.js';
 
 import dashboardScreen from './screens/dashboard.js';
 import productsScreen from './screens/products.js';
@@ -46,27 +43,25 @@ export const ROUTES = [
  *
  * "التقارير" has to be in BOTTOM_NAV, not only in SIDE_NAV: the sidebar is
  * `display: none` below 900px, so a screen listed only there had no navigation
- * at all on the device this app actually runs on. The bar is a flex row of
- * `flex: 1 1 0` items, so it absorbs the extra destination without any
- * layout change.
+ * at all on the device this app actually runs on.
  *
- * Settings is deliberately NOT here. Six destinations is the most a 360px
- * phone can carry before each item drops under the 48px comfortable touch
- * target once the label is accounted for, and the bar carries the daily
- * workflow only. Settings stays
+ * There is no cart button here, and that is deliberate. It used to be the sixth
+ * item: a button that opened the floating basket, in a bar whose other five
+ * items are all destinations — and the only way to reach a half-finished
+ * invoice from a screen that has nothing to do with selling. The cart is a
+ * sale-screen instrument now (see cart-bar.js): on POS the topbar button opens
+ * it and the bar peeks at the bottom, and everywhere else no part of it is
+ * drawn. Five items also means each one keeps a comfortable tap target on a
+ * 360px phone, which six squeezed them under.
+ *
+ * Settings is deliberately NOT here. It stays
  * in SIDE_NAV for desktop and is one tap away on mobile from the settings
  * icon-btn main.js puts in the topbar, so nothing becomes unreachable.
- *
- * The cart button is not a destination either. It opens the floating basket,
- * which lives above the bottom bar on every screen, and it keeps a live count
- * of what is in the invoice in progress — so it works with an empty basket
- * too, showing an explicit empty state instead of doing nothing at all.
  */
 export const BOTTOM_NAV = [
   { id: 'dashboard', label: 'الرئيسية', icon: 'dashboard', href: '#/dashboard' },
   { id: 'products', label: 'المخزن', icon: 'package', href: '#/products' },
   { id: 'pos', label: 'بيع جديد', icon: 'store', href: '#/pos', primary: true },
-  { id: 'cart', label: 'السلة', icon: 'cart', action: 'cart' },
   { id: 'suppliers', label: 'الموردون', icon: 'truck', href: '#/suppliers' },
   { id: 'reports', label: 'التقارير', icon: 'chart', href: '#/reports' },
 ];
@@ -86,7 +81,6 @@ const TRANSITION_MS = 170;
 let currentRoute = null;      // { path, route, params, order }
 let lastOrder = 0;
 let lowStockCount = 0;
-let cartCount = 0;
 const listeners = new Set();
 
 export function onRoute(fn) {
@@ -125,24 +119,6 @@ function match(path) {
  * ------------------------------------------------------------------ */
 
 function buildNavItem(item, activeId) {
-  // The cart entry is a button, not a link: it opens the floating basket in
-  // place — on any screen, with or without anything in it — instead of routing
-  // somewhere. Everything else stays a normal hash link.
-  if (item.id === 'cart') {
-    const n = cartCount;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'nav-item nav-item--cart' + (n > 0 ? ' is-live' : '');
-    btn.dataset.nav = 'cart';
-    btn.innerHTML =
-      icon(item.icon) +
-      `<span>${escapeHTML(item.label)}</span>` +
-      (n > 0 ? `<span class="nav-item__badge nav-item__badge--cart">${n}</span>` : '');
-    btn.setAttribute('aria-label', n > 0 ? `السلة — ${n} قطعة` : 'السلة — فارغة');
-    btn.addEventListener('click', () => setPanelOpen(!isPanelOpen()));
-    return btn;
-  }
-
   const a = document.createElement('a');
   a.className = 'nav-item' + (item.primary ? ' nav-item--primary' : '') + (item.id === activeId ? ' is-active' : '');
   a.href = item.href;
@@ -184,20 +160,6 @@ export function setLowStockCount(n) {
   lowStockCount = n;
   const active = document.querySelector('.bottomnav .nav-item.is-active')?.dataset.nav;
   renderNav(active || currentRoute?.route.nav || 'dashboard');
-}
-
-/**
- * Keeps the cart button's badge in step with the basket. Only that one button
- * is rebuilt — a full renderNav() on every quantity change would rip the nav
- * out from under a finger that is mid-tap.
- */
-export function setCartCount(n) {
-  const next = Number(n) || 0;
-  if (cartCount === next) return;
-  cartCount = next;
-  const btn = document.querySelector('.bottomnav .nav-item--cart');
-  if (!btn) return;
-  btn.replaceWith(buildNavItem(BOTTOM_NAV.find((i) => i.id === 'cart'), ''));
 }
 
 /* ------------------------------------------------------------------ *
@@ -269,8 +231,8 @@ async function render() {
   currentRoute = { path, route, params, order: route.order };
   lastOrder = route.order;
   renderNav(route.nav);
-  // POS shows the full cart in its own column, so the sticky bar stands down
-  // there and stands up everywhere else.
+  // The cart is a sale-screen instrument: this class is the single switch that
+  // decides whether the floating bar, its panel and the topbar count are drawn.
   document.body.classList.toggle('is-pos', path === 'pos');
 
   // let the screen know it is live (for chart teardown etc.)

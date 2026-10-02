@@ -296,6 +296,41 @@ h1, h2, h3, h4, h5 {
 .icon-btn.is-on { background: var(--primary-tint); color: var(--primary); }
 .icon-btn[disabled] { opacity: 0.28; pointer-events: none; }
 
+/* The topbar storefront button, which is the cart's handle on the sale screen.
+   It carries a count there — and only there: a cart badge on the dashboard would
+   be a cart icon on a screen that has no cart. Outside the sale screen the
+   button is a shortcut to the sale screen again and wears no count.
+   `[data-mode]` is written by cart-bar.js, so the two states cannot drift apart
+   from what the button actually does. */
+.topbar-cart { position: relative; }
+
+.topbar-cart__badge {
+  position: absolute;
+  top: 2px;
+  inset-inline-start: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  color: var(--ink-on-primary);
+  font-size: 9.5px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.18s, transform 0.18s var(--ease-spring);
+  pointer-events: none;
+}
+
+.topbar-cart__badge.is-on { opacity: 1; transform: scale(1); }
+
+/* In cart mode the icon tints to primary, so the button reads as "something is
+   open down there" the way the old bottom-nav cart item did. */
+.topbar-cart[data-mode='cart'] { color: var(--primary); }
+
 /* Compact stepper used inside a section header (the day's invoices). */
 .icon-btn--sm {
   width: 32px;

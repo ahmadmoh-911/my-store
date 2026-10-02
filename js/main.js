@@ -16,7 +16,7 @@ import { lowStockProducts } from './analytics.js';
 import { seedIfEmpty } from './seed.js';
 import { toast, closeTopOverlay } from './components.js';
 import { startRouter, renderNav, setLowStockCount, onRoute, navigate, getPath } from './router.js';
-import { mountCartBar } from './cart-bar.js';
+import { mountCartBar, cartAffordanceVisible, openCart } from './cart-bar.js';
 import { isNative, onNativeBack, minimizeApp } from './native.js';
 
 /* ------------------------------------------------------------------ *
@@ -91,11 +91,30 @@ function buildTopbar() {
 
   const end = el('div.topbar__end');
   end.appendChild(el('span.net-dot', { id: 'net-dot', title: 'متصل' }, el('i')));
+
+  // The storefront button beside the settings gear is the cart's own handle.
+  //
+  // It used to be a shortcut to the sale screen and nothing else, which is why
+  // the cart needed a sixth slot in the bottom bar: the only button near the top
+  // of the screen could not be the cart. Now that the cart belongs to the sale
+  // screen, this button *is* it there — one tap to the invoice in progress,
+  // with or without anything in it. Outside the sale screen there is no cart to
+  // open, so the same button goes to the sale screen and says so.
+  //
+  // It never goes to the dashboard. That is what the brand name and the bottom
+  // bar's "الرئيسية" are for, and neither of those is a cart.
   end.appendChild(
     el(
-      'button.icon-btn',
-      { type: 'button', 'aria-label': 'بيع جديد', title: 'بيع جديد', onClick: () => navigate('pos') },
-      fromHTML(icon('store'))
+      'button.icon-btn.topbar-cart',
+      {
+        type: 'button',
+        id: 'topbar-cart',
+        'aria-label': 'بيع جديد',
+        title: 'بيع جديد',
+        onClick: onCartButton,
+      },
+      fromHTML(icon('store')),
+      el('span.topbar-cart__badge', { 'aria-hidden': 'true' })
     )
   );
   end.appendChild(
@@ -106,6 +125,21 @@ function buildTopbar() {
     )
   );
   bar.appendChild(end);
+}
+
+/**
+ * The topbar cart button's one action.
+ *
+ * Resolved at click time rather than bound at build time, because the cart bar
+ * is mounted after the topbar and because whether this button is a cart or a
+ * shortcut depends on the current screen.
+ */
+function onCartButton() {
+  if (cartAffordanceVisible()) {
+    openCart();
+    return;
+  }
+  navigate('pos');
 }
 
 function paintStoreName() {
@@ -294,9 +328,9 @@ async function boot() {
   buildTopbar();
   paintStoreName();
 
-  // The sticky cart bar lives in document.body, outside #view, so a sale in
-  // progress survives every navigation. Mounted before the first screen so it
-  // is never missing for the opening render.
+  // The cart lives in document.body, outside #view, so a sale in progress
+  // survives every navigation. Mounted before the first screen so it is never
+  // missing for the opening render.
   const cartBar = mountCartBar();
 
   // render the first screen before revealing the shell so there's no flash
@@ -322,7 +356,7 @@ async function boot() {
     // `current` is the router's route object ({ path, route, params, order }),
     // not a path string — syncRoute compares against 'pos', so pass the path.
     const path = current?.path || '';
-    // fold the cart bar away when leaving POS, and re-check its numbers
+    // Decide whether the cart is on offer at all, and fold its panel away if not.
     cartBar.syncRoute(path);
     getSettings().then((s) => {
       if (s.storeName !== currentSettings?.storeName) {

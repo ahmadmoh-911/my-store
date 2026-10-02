@@ -6,11 +6,20 @@
  * db.updateSale(), which moves inventory by the difference between the old and
  * new quantities, so fixing a mis-keyed line puts the stock back rather than
  * counting it twice.
+ *
+ * ── Why this view was rebuilt ────────────────────────────────────────────
+ * It used to render with no stylesheet at all. `.inv`, `.inv-meta`, `.inv-item`
+ * and `.inv-totals` had no rules anywhere in the app, so a list of `<div>`s
+ * stacked with no separation on the sheet's dark backdrop and the text ran into
+ * the text below it: unreadable, and impossible to check a number against. The
+ * same theme, cards, borders and dividers as everything else in the app are used
+ * here now, laid out the way a paper receipt is: who and when at the top, a card
+ * per line, and the money in one block at the bottom.
  */
 import { icon } from './icons.js';
-import { el, fromHTML, clear, moneyHTML, fmtDate } from './utils.js';
+import { el, fromHTML, clear, moneyHTML, fmtDate, fmtTime } from './utils.js';
 import { openSheet, confirmDialog, toast } from './components.js';
-import { updateSale, refundSale, getSettings } from './db.js';
+import { updateSale, refundSale, getSettings, listProducts } from './db.js';
 
 const PAYMENTS = [
   { id: 'cash', label: 'نقداً' },
@@ -20,9 +29,15 @@ const PAYMENTS = [
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+/** Any number at or above zero. A price typed as "-5" is 0, not minus five. */
+const nonNeg = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
 function totalsOf(items, discountType, discountValue) {
   const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
-  const v = Number(discountValue) || 0;
+  const v = nonNeg(discountValue);
   const discount = discountType === 'percent'
     ? round2((subtotal * Math.min(v, 100)) / 100)
     : Math.min(round2(v), subtotal);
@@ -38,20 +53,42 @@ export function openInvoiceSheet(sale, opts = {}) {
   const draft = {
     items: (sale.items || []).map((it) => ({ ...it })),
     discountType: sale.discountType || 'fixed',
-    discountValue: Number(sale.discountValue) || 0,
+    discountValue: Math.max(0, Number(sale.discountValue) || 0),
     paymentMethod: sale.paymentMethod || 'cash',
     note: sale.note || '',
   };
+  // What the invoice said when the sheet opened. Cancelling an edit puts this
+  // back, because the receipt below is drawn from `draft`: without it, backing
+  // out of an edit would leave the owner looking at figures that were never saved
+  // and that match neither the record nor anything on paper.
+  const pristine = {
+    items: draft.items.map((it) => ({ ...it })),
+    discountType: draft.discountType,
+    discountValue: draft.discountValue,
+    paymentMethod: draft.paymentMethod,
+    note: draft.note,
+  };
+  /** Throws the working copy away and starts again from what is on record. */
+  function discardEdits() {
+    draft.items = pristine.items.map((it) => ({ ...it }));
+    draft.discountType = pristine.discountType;
+    draft.discountValue = pristine.discountValue;
+    draft.paymentMethod = pristine.paymentMethod;
+    draft.note = pristine.note;
+  }
   let editing = false;
   let currency = 'ILS';
+  /** productId → product, so each line can show the picture of what was sold. */
+  let images = new Map();
 
   const body = el('div.inv');
   const foot = el('div.inv-foot');
 
   const sheet = openSheet({ title: `فاتورة ${sale.receiptNo || ''}`, body, foot });
 
-  getSettings().then((s) => {
+  Promise.all([getSettings(), listProducts()]).then(([s, products]) => {
     currency = s.currency || 'ILS';
+    images = new Map((products || []).map((p) => [p.id, p.image || '']));
     paint();
   });
 
@@ -70,7 +107,7 @@ export function openInvoiceSheet(sale, opts = {}) {
 
     if (editing) {
       foot.appendChild(
-        el('button.btn.btn--ghost', { type: 'button', onClick: () => { editing = false; paint(); } },
+        el('button.btn.btn--ghost', { type: 'button', onClick: () => { discardEdits(); editing = false; paint(); } },
           fromHTML(icon('x')), el('span', { text: 'إلغاء' }))
       );
       foot.appendChild(
@@ -88,19 +125,43 @@ export function openInvoiceSheet(sale, opts = {}) {
     }
   }
 
+  /** The picture for a line, or a neutral placeholder if the product is gone. */
+  function thumb(it) {
+    const src = images.get(it.productId);
+    return src
+      ? el('img.inv-item__img', { src, alt: '', loading: 'lazy' })
+      : el('span.inv-item__img.inv-item__img--none', { 'aria-hidden': 'true' }, fromHTML(icon('hanger')));
+  }
+
   /* --- read-only view ---------------------------------------------- */
 
   function readOnly(t) {
+    const when = new Date(sale.timestamp);
+    const payLabel = PAYMENTS.find((p) => p.id === draft.paymentMethod)?.label || draft.paymentMethod;
+
     return el(
       'div',
       {},
+      /* header — what this invoice is, before anything else */
       el(
-        'div.inv-meta',
+        'div.inv-head',
         {},
-        el('div.inv-meta__cell', {}, el('span.tiny.muted', { text: 'التاريخ' }), el('span', { text: fmtDate(new Date(sale.timestamp), true) })),
-        el('div.inv-meta__cell', {}, el('span.tiny.muted', { text: 'الدفع' }),
-          el('span', { text: PAYMENTS.find((p) => p.id === draft.paymentMethod)?.label || draft.paymentMethod }))
+        el(
+          'div.inv-head__top',
+          {},
+          el('span.inv-head__label', { text: 'فاتورة بيع' }),
+          el('b.inv-head__no', { text: sale.receiptNo || '—' })
+        ),
+        el(
+          'div.inv-head__facts',
+          {},
+          el('span.inv-head__fact', {}, fromHTML(icon('receipt')), el('span', { text: fmtDate(when, true) })),
+          el('span.inv-head__fact', {}, fromHTML(icon('clock')), el('span', { text: fmtTime(when) })),
+          el('span.inv-head__fact', {}, fromHTML(icon('cash')), el('span', { text: payLabel }))
+        )
       ),
+
+      /* one card per line: what, which variant, how many, at what price */
       el(
         'div.inv-items',
         {},
@@ -108,28 +169,43 @@ export function openInvoiceSheet(sale, opts = {}) {
           el(
             'div.inv-item',
             {},
-            el('div.inv-item__main', {},
+            thumb(it),
+            el(
+              'div.inv-item__main',
+              {},
               el('div.inv-item__name', { text: it.name }),
-              el('div.inv-item__meta', { text: [it.size, it.color].filter(Boolean).join(' · ') || '—' })),
-            el('div.inv-item__qty', { text: `×${it.qty}` }),
-            el('div.inv-item__sum', { html: moneyHTML(it.qty * it.price, currency) })
+              el(
+                'div.inv-item__meta',
+                {},
+                it.size ? el('span.size-pill', { style: 'height:21px;min-width:auto;font-size:10.5px', text: it.size }) : null,
+                it.color ? el('span', { text: it.color }) : null,
+                !it.size && !it.color ? el('span', { text: '—' }) : null
+              )
+            ),
+            el(
+              'div.inv-item__grid',
+              {},
+              el('div.inv-cell', {}, el('span.inv-cell__k', { text: 'الكمية' }), el('b.inv-cell__v', { text: String(it.qty) })),
+              el('div.inv-cell', {}, el('span.inv-cell__k', { text: 'سعر الوحدة' }), el('b.inv-cell__v', { html: moneyHTML(it.price, currency) })),
+              el('div.inv-cell.inv-cell--sum', {}, el('span.inv-cell__k', { text: 'الإجمالي' }), el('b.inv-cell__v', { html: moneyHTML(it.qty * it.price, currency) }))
+            )
           )
         )
       ),
-      // `html`, not `text`: the fixed-amount branch embeds moneyHTML's markup
-      // (a <span class="cur"> currency chip) and textContent would print it raw.
-      t.discount > 0.004
-        ? el('div.inv-note', {}, fromHTML(icon('tag')), el('span', {
-            html: `خصم ${draft.discountType === 'percent' ? `${draft.discountValue}%` : moneyHTML(draft.discountValue, currency)}`,
-          }))
-        : null,
+
+      /* the money, in one block */
       el(
         'div.inv-totals',
         {},
-        el('div.inv-total', {}, el('span', { text: 'المجموع' }), el('span', { html: moneyHTML(t.subtotal, currency) })),
-        t.discount > 0.004 ? el('div.inv-total.inv-total--off', {}, el('span', { text: 'الخصم' }), el('span', { html: `-${moneyHTML(t.discount, currency)}` })) : null,
+        el('div.inv-total', {}, el('span', { text: 'المجموع الفرعي' }), el('span', { html: moneyHTML(t.subtotal, currency) })),
+        t.discount > 0.004
+          ? el('div.inv-total.inv-total--off', {}, el('span', { text: `الخصم${draft.discountType === 'percent' ? ` (${draft.discountValue}%)` : ''}` }), el('span', { html: `−${moneyHTML(t.discount, currency)}` }))
+          : null,
         el('div.inv-total.inv-total--grand', {}, el('span', { text: 'الإجمالي' }), el('span', { html: moneyHTML(t.total, currency) }))
       ),
+
+      /* `html`, not `text`: the fixed-amount branch embeds moneyHTML's markup
+         (a <span class="cur"> currency chip) and textContent would print it raw. */
       draft.note ? el('div.inv-note', {}, fromHTML(icon('info')), el('span', { text: draft.note })) : null
     );
   }
@@ -144,6 +220,7 @@ export function openInvoiceSheet(sale, opts = {}) {
         el(
           'div.inv-item.inv-item--edit',
           {},
+          thumb(it),
           el('div.inv-item__main', {},
             el('div.inv-item__name', { text: it.name }),
             el('div.inv-item__meta', { text: [it.size, it.color].filter(Boolean).join(' · ') || '—' })),
@@ -161,7 +238,10 @@ export function openInvoiceSheet(sale, opts = {}) {
             inputmode: 'decimal',
             value: String(it.price),
             'aria-label': 'سعر الوحدة',
-            onInput: (e) => { it.price = Number(e.target.value) || 0; refreshTotalsOnly(); },
+            onInput: (e) => { it.price = nonNeg(e.target.value); refreshTotalsOnly(); },
+            // A refused value is shown as refused: an empty box, not a minus
+            // sign the owner has to spot and delete themselves.
+            onBlur: (e) => { e.target.value = String(nonNeg(e.target.value)); },
           }),
           el('div.inv-item__sum', { html: moneyHTML(it.qty * it.price, currency) }),
           el('button.inv-item__x', {
@@ -190,14 +270,14 @@ export function openInvoiceSheet(sale, opts = {}) {
           el('label.inv-field__label', { text: 'نوع الخصم' }),
           el('div.seg', {},
             el('button', { type: 'button', class: draft.discountType === 'fixed' ? 'is-active' : '', text: 'مبلغ', onClick: () => { draft.discountType = 'fixed'; paint(); } }),
-            el('button', { type: 'button', class: draft.discountType === 'percent' ? 'is-active' : '', text: 'نسبة %', onClick: () => { draft.discountType = 'percent'; paint(); } })
-          )),
+            el('button', { type: 'button', class: draft.discountType === 'percent' ? 'is-active' : '', text: 'نسبة %', onClick: () => { draft.discountType = 'percent'; paint(); } }))),
         el('div.inv-field', {},
           el('label.inv-field__label', { text: 'قيمة الخصم' }),
           el('input.input', {
             type: 'number', step: draft.discountType === 'percent' ? '1' : '0.01', min: '0',
             inputmode: 'decimal', value: String(draft.discountValue),
-            onInput: (e) => { draft.discountValue = Number(e.target.value) || 0; refreshTotalsOnly(); },
+            onInput: (e) => { draft.discountValue = nonNeg(e.target.value); refreshTotalsOnly(); },
+            onBlur: (e) => { e.target.value = String(nonNeg(e.target.value)); },
           })),
         el('div.inv-field', {},
           el('label.inv-field__label', { text: 'طريقة الدفع' }),
@@ -218,9 +298,9 @@ export function openInvoiceSheet(sale, opts = {}) {
 
     for (const host of body.querySelectorAll('.inv-totals')) {
       clear(host);
-      host.appendChild(el('div.inv-total', {}, el('span', { text: 'المجموع' }), el('span', { html: moneyHTML(t.subtotal, currency) })));
+      host.appendChild(el('div.inv-total', {}, el('span', { text: 'المجموع الفرعي' }), el('span', { html: moneyHTML(t.subtotal, currency) })));
       if (t.discount > 0.004) {
-        host.appendChild(el('div.inv-total.inv-total--off', {}, el('span', { text: 'الخصم' }), el('span', { html: `-${moneyHTML(t.discount, currency)}` })));
+        host.appendChild(el('div.inv-total.inv-total--off', {}, el('span', { text: 'الخصم' }), el('span', { html: `−${moneyHTML(t.discount, currency)}` })));
       }
       host.appendChild(el('div.inv-total.inv-total--grand', {}, el('span', { text: 'الإجمالي' }), el('span', { html: moneyHTML(t.total, currency) })));
     }
@@ -237,8 +317,9 @@ export function openInvoiceSheet(sale, opts = {}) {
     const it = draft.items[idx];
     if (!it) return;
     // No ceiling here: the point of editing a sale is often to record a quantity
-    // that was not available when it was written.
-    it.qty = Math.max(0, next);
+    // that was not available when it was written. A floor of 1 still applies —
+    // zero is not a line, it is the absence of one.
+    it.qty = Math.max(1, Math.round(next) || 1);
     paint();
   }
 
