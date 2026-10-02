@@ -15,7 +15,7 @@ import {
 import {
   listProducts, saveProduct, getSettings, saveSettings, deleteProduct, stockOf,
 } from '../db.js';
-import { pageHead, openModal, confirmDialog, celebrate, promptDialog, toast } from '../components.js';
+import { pageHead, openModal, confirmDialog, celebrate, promptDialog, toast, pinDialog } from '../components.js';
 import { scanBarcode } from '../scanner.js';
 import { navigate } from '../router.js';
 
@@ -414,12 +414,76 @@ function buildForm(d, settings, editingId) {
 
   const matrixHost = el('div');
 
-  wrap.appendChild(
-    section(3, 'الأحجام والألوان', null, [
-      el('div.field', {}, el('label.field__label', {}, el('span', { text: 'المقاسات المتاحة' }), el('span.field__hint', { id: 'sizes-count' })), sizesHost, sizeLibrary),
-      el('div.field', {}, el('label.field__label', {}, el('span', { text: 'ألوان المنتج' }), el('span.field__hint', { id: 'colors-count' })), colorsHost, colorLibrary),
-    ])
-  );
+  /* --- the local gate ------------------------------------------------ *
+   *
+   * Editing the quantities, sizes or colours of a product that is ALREADY on
+   * the shelf is the fastest way to lose a real count, and the damage stays
+   * invisible until a sale fails at the till. Those two sections therefore sit
+   * behind the app's local pin while a saved product is being edited.
+   *
+   * A brand-new product is not locked: there is no recorded stock to damage
+   * yet, and forcing the pin before the very first size is chosen would be
+   * pure friction. Prices, names, categories and the barcode are never locked.
+   * ------------------------------------------------------------------- */
+  const gate = { open: !editingId };
+
+  async function unlock() {
+    if (gate.open) return true;
+    const ok = await pinDialog({
+      title: 'المقاسات والكميات محمية',
+      hint: 'أدخل رمز المتجر لتعديل مقاسات وألوان وكميات منتج قائم. الأسعار والاسم والصور غير مقفلة.',
+      pin: settings.editPin || '0000',
+    });
+    if (!ok) return false;
+    gate.open = true;
+    paintGate();
+    return true;
+  }
+
+  const gateBanner = el('div.form-lock__banner');
+  const gateSections = [];
+
+  function paintGate() {
+    for (const sec of gateSections) {
+      sec.classList.toggle('is-locked', !gate.open);
+      const mark = sec.querySelector('.form-lock__mark');
+      if (mark) mark.hidden = gate.open;
+    }
+    clear(gateBanner);
+    gateBanner.hidden = gate.open || !editingId;
+    if (gateBanner.hidden) return;
+    gateBanner.appendChild(
+      el(
+        'div.form-lock__box',
+        {},
+        fromHTML(icon('sliders')),
+        el(
+          'div.form-lock__txt',
+          {},
+          el('b', { text: 'المقاسات والألوان والكميات محمية' }),
+          el('span.tiny', { text: 'أدخل رمز المتجر لتعديلها. باقي البيانات قابلة للتعديل.' })
+        ),
+        el('button.btn.btn--soft.btn--sm', { type: 'button', text: 'فتح', onClick: unlock })
+      )
+    );
+  }
+
+  /* --- 3 · sizes & colours (locked while editing a saved product) ----- */
+  const sizesSection = section(3, 'الأحجام والألوان', null, [
+    el('div.field', {}, el('label.field__label', {}, el('span', { text: 'المقاسات المتاحة' }), el('span.field__hint', { id: 'sizes-count' })), sizesHost, sizeLibrary),
+    el('div.field', {}, el('label.field__label', {}, el('span', { text: 'ألوان المنتج' }), el('span.field__hint', { id: 'colors-count' })), colorsHost, colorLibrary),
+  ]);
+  markSection(sizesSection);
+  wrap.appendChild(gateBanner);
+  wrap.appendChild(sizesSection);
+
+  function markSection(sec) {
+    sec.querySelector('.form-section__head')?.appendChild(
+      el('span.form-lock__mark', { hidden: gate.open }, fromHTML(icon('sliders')))
+    );
+    gateSections.push(sec);
+    return sec;
+  }
 
   /* --- 4 · pricing --------------------------------------------------- */
   const priceInput = field('سعر البيع', {
@@ -467,28 +531,28 @@ function buildForm(d, settings, editingId) {
   );
 
   /* --- 5 · stock matrix ---------------------------------------------- */
-  wrap.appendChild(
-    section(5, 'مخزون القطعة', 'الكمية لكل مقاس ولون', [
+  const stockSection = section(5, 'مخزون القطعة', 'الكمية لكل مقاس ولون', [
+    el(
+      'div',
+      { style: 'display:flex;gap:9px;flex-wrap:wrap;margin-bottom:4px' },
       el(
-        'div',
-        { style: 'display:flex;gap:9px;flex-wrap:wrap;margin-bottom:4px' },
-        el(
-          'div.search',
-          { style: 'flex:1;min-width:170px;min-height:42px' },
-          fromHTML(icon('layers')),
-          el('input', {
-            type: 'number',
-            min: '0',
-            placeholder: 'كمية سريعة لكل المقاسات',
-            oninput: (e) => fillAll(e.target.value),
-          })
-        ),
-        el('button.btn.btn--sm.btn--soft', { type: 'button', onClick: () => fillAll('0') }, fromHTML(icon('refresh')), el('span', { text: 'تصفير' }))
+        'div.search',
+        { style: 'flex:1;min-width:170px;min-height:42px' },
+        fromHTML(icon('layers')),
+        el('input', {
+          type: 'number',
+          min: '0',
+          placeholder: 'كمية سريعة لكل المقاسات',
+          oninput: (e) => fillAll(e.target.value),
+        })
       ),
-      matrixHost,
-      el('div', { id: 'stock-summary', style: 'margin-top:12px' }),
-    ])
-  );
+      el('button.btn.btn--sm.btn--soft', { type: 'button', onClick: () => fillAll('0') }, fromHTML(icon('refresh')), el('span', { text: 'تصفير' }))
+    ),
+    matrixHost,
+    el('div', { id: 'stock-summary', style: 'margin-top:12px' }),
+  ]);
+  markSection(stockSection);
+  wrap.appendChild(stockSection);
 
   /* --- matrix rendering ---------------------------------------------- */
   function paintMatrix() {
@@ -582,6 +646,7 @@ function buildForm(d, settings, editingId) {
   paintColors();
   paintMatrix();
   paintMargin();
+  paintGate();
 
   /* --- actions -------------------------------------------------------- */
   const saveBtn = el(

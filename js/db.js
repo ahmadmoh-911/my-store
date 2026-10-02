@@ -9,6 +9,7 @@
  * Stores
  *   products          keyPath 'id'   index 'createdAt'
  *   sales             keyPath 'id'   index 'timestamp'
+ *   purchases         keyPath 'id'   index 'date'
  *   suppliers         keyPath 'id'   index 'createdAt'
  *   supplierInvoices  keyPath 'id'   index 'date'
  *   supplierPayments  keyPath 'id'   index 'date'
@@ -16,7 +17,20 @@
  *
  * Supplier invoices are a *purchases* ledger. They deliberately carry no
  * productId: recording a supplier bill must never touch stock, variants or
- * cost price. Inventory stays owned by createSale/refundSale alone.
+ * cost price.
+ *
+ * `purchases` is the opposite and the only inventory-writing purchase path:
+ * it is what "تجديد الكمية" (restock) writes, and it raises the exact
+ * size+colour variant it names. A supplier bill you type in by hand stays a
+ * money record; stock only moves when the owner says it did.
+ *
+ * Store balance is DERIVED, never a stored counter:
+ *
+ *   balance = settings.openingBalance + Σ sales.total − Σ purchases.total
+ *
+ * A refund deletes the sale, so the credit reverses by construction; editing a
+ * sale moves the balance with it. Nothing to reconcile, nothing that can drift
+ * out of step with the records it is supposed to summarise.
  */
 
 // The only import in this file: dayKeyOf maps a stored UTC timestamp back to
@@ -26,11 +40,12 @@
 import { dayKeyOf } from './utils.js';
 
 export const DB_NAME = 'saher_db';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export const STORES = {
   products: 'products',
   sales: 'sales',
+  purchases: 'purchases',
   suppliers: 'suppliers',
   supplierInvoices: 'supplierInvoices',
   supplierPayments: 'supplierPayments',
@@ -56,6 +71,12 @@ export function openDB() {
       if (!db.objectStoreNames.contains(STORES.sales)) {
         const s = db.createObjectStore(STORES.sales, { keyPath: 'id' });
         s.createIndex('timestamp', 'timestamp');
+      }
+      if (!db.objectStoreNames.contains(STORES.purchases)) {
+        const s = db.createObjectStore(STORES.purchases, { keyPath: 'id' });
+        s.createIndex('date', 'date');
+        s.createIndex('productId', 'productId');
+        s.createIndex('supplierId', 'supplierId');
       }
       if (!db.objectStoreNames.contains(STORES.suppliers)) {
         const s = db.createObjectStore(STORES.suppliers, { keyPath: 'id' });
@@ -251,6 +272,190 @@ export function availableVariants(product) {
 export const totalStock = (products) => products.reduce((t, p) => t + stockOf(p), 0);
 export const inventoryValue = (products) =>
   products.reduce((t, p) => t + stockOf(p) * (Number(p.costPrice) || 0), 0);
+
+/* ------------------------------------------------------------------ *
+ * Domain: purchases (restock — the ONLY path that raises stock)
+ * ------------------------------------------------------------------ */
+
+export const listPurchases = () => getAll(STORES.purchases);
+export const deletePurchase = (id) => del(STORES.purchases, id);
+
+/**
+ * Records a restock: the named size+colour variants gain exactly the quantity
+ * entered, the purchase price is remembered, the product's cost/sale price is
+ * updated when the owner changes them, and one `purchases` row is written for
+ * the store balance to read.
+ *
+ * One transaction over products + purchases, so stock can never move without
+ * its money record (or the other way round). A line that names a variant the
+ * product does not have is dropped rather than silently merged into another
+ * one — the caller gets `written` back so it can tell the user what landed.
+ *
+ * @param {object} po
+ * @param {string} po.productId
+ * @param {string} [po.supplierId]
+ * @param {string} [po.supplierName]
+ * @param {string} [po.date]        ISO date of the purchase/order
+ * @param {number} [po.unitCost]    purchase price per piece (updates the product)
+ * @param {number} [po.newPrice]    optional new sale price (updates the product)
+ * @param {Array}  po.lines         [{size, color, qty}]
+ * @returns {Promise<{record: object, written: Array}>}
+ */
+export function createPurchase(po) {
+  const lines = (po.lines || [])
+    .map((l) => ({
+      size: l.size || '',
+      color: l.color || '',
+      qty: Math.max(0, Math.round(Number(l.qty) || 0)),
+    }))
+    .filter((l) => l.qty > 0);
+
+  if (!po.productId) return Promise.reject(new Error('لا يوجد منتج محدد'));
+  if (!lines.length) return Promise.reject(new Error('الكمية يجب أن تكون أكبر من صفر'));
+
+  const unitCost = Math.max(0, Number(po.unitCost) || 0);
+  const newPrice =
+    po.newPrice === undefined || po.newPrice === null || po.newPrice === ''
+      ? null
+      : round2(Math.max(0, Number(po.newPrice) || 0));
+
+  // The money half is written INSIDE the transaction, after the stock half has
+  // resolved which variants actually exist. Billing the requested lines instead
+  // would debit the store balance for pieces that never arrived — the ledger
+  // would say we paid for stock we do not have, which is the one thing this
+  // ledger exists to prevent.
+  const record = {
+    id: po.id || cryptoId(),
+    productId: po.productId,
+    productName: po.productName || '',
+    supplierId: po.supplierId || '',
+    supplierName: po.supplierName || '',
+    date: po.date || new Date().toISOString(),
+    unitCost,
+    units: 0,
+    total: 0,
+    newPrice,
+    lines: [],
+    note: po.note || '',
+    createdAt: new Date().toISOString(),
+  };
+
+  return multiTx([STORES.products, STORES.purchases], 'readwrite', (store) => {
+    const productsStore = store(STORES.products);
+    const written = [];
+    const req = productsStore.get(po.productId);
+    req.onsuccess = () => {
+      const p = req.result;
+      const now = new Date().toISOString();
+
+      if (p) {
+        for (const l of lines) {
+          // exact variant only — never fold one size/colour into another
+          const v = (p.variants || []).find((x) => (x.size || '') === l.size && (x.color || '') === l.color);
+          if (!v) continue;
+          v.quantity = Math.max(0, (Number(v.quantity) || 0) + l.qty);
+          written.push(l);
+        }
+        if (written.length) {
+          if (unitCost > 0) p.costPrice = unitCost;
+          if (newPrice !== null) p.price = newPrice;
+          p.updatedAt = now;
+          productsStore.put(p);
+        }
+      }
+
+      // Only what landed is billed: an unresolvable variant costs nothing.
+      record.lines = written;
+      record.units = written.reduce((t, l) => t + l.qty, 0);
+      record.total = round2(unitCost * record.units);
+      store(STORES.purchases).put(record);
+    };
+
+    // Resolved only once the transaction has completed, at which point
+    // `written` is filled in — the caller can trust both halves of it.
+    return { record, written };
+  });
+}
+
+/**
+ * The store's cash position, derived from the records that actually exist.
+ *
+ *   opening balance + completed sales − restock purchases
+ *
+ * Sales and purchases are read from the `sales` / `purchases` stores, so a
+ * refund (which deletes its sale) and an edited sale total are already
+ * reflected. Nothing here is stored, so it cannot disagree with the data.
+ */
+export function storeLedger(sales, purchases, settings) {
+  const opening = round2(Number(settings?.openingBalance) || 0);
+  const salesTotal = round2((sales || []).reduce((t, s) => t + (Number(s.total) || 0), 0));
+  const purchasesTotal = round2((purchases || []).reduce((t, p) => t + (Number(p.total) || 0), 0));
+
+  /* The trace. Every line here is a real record that exists in the database —
+   * there is no synthetic "expenses" row, because the app does not pretend to
+   * do accounting it cannot do. A refunded sale does not appear here as a
+   * reversal: `refundSale` deletes the sale, so the reversal IS the sale's
+   * absence, and the balance below already reflects it. */
+  const entries = [];
+  if (opening) {
+    entries.push({
+      type: 'opening',
+      label: 'الرصيد الافتتاحي',
+      date: null,
+      amount: opening,
+      sign: 1,
+      ref: null,
+    });
+  }
+  for (const p of purchases || []) {
+    const amount = round2(Number(p.total) || 0);
+    if (!amount) continue;
+    entries.push({
+      type: 'restock',
+      label: p.productName ? `تجديد كمية — ${p.productName}` : 'تجديد كمية',
+      date: p.date || p.createdAt || null,
+      amount,
+      sign: -1,
+      ref: p.id,
+    });
+  }
+  for (const s of sales || []) {
+    const amount = round2(Number(s.total) || 0);
+    if (!amount) continue;
+    entries.push({
+      type: 'sale',
+      label: s.receiptNo ? `فاتورة بيع ${s.receiptNo}` : 'فاتورة بيع',
+      date: s.timestamp || null,
+      amount,
+      sign: 1,
+      ref: s.id,
+    });
+  }
+  entries.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  let run = 0;
+  for (const e of entries) {
+    run = round2(run + e.sign * e.amount);
+    e.balance = run;
+  }
+
+  return {
+    opening,
+    salesTotal,
+    purchasesTotal,
+    balance: round2(opening + salesTotal - purchasesTotal),
+    entries,
+  };
+}
+
+/** Convenience wrapper — the number every screen shows. */
+export async function storeBalance() {
+  const [sales, purchases, settings] = await Promise.all([
+    listSales(),
+    listPurchases(),
+    getSettings(),
+  ]);
+  return storeLedger(sales, purchases, settings).balance;
+}
 
 /* ------------------------------------------------------------------ *
  * Domain: sales
@@ -510,7 +715,29 @@ export function saveSupplier(s) {
   });
 }
 
-export const deleteSupplier = (id) => del(STORES.suppliers, id);
+/**
+ * Removes a supplier together with everything owed on their account.
+ *
+ * The cascade lives here rather than in the screen that offers the button: an
+ * invoice left behind with no supplier would sit in every "total owed" sum and
+ * could be re-attached to a new supplier with the same name, quietly corrupting
+ * both balances. Restock records are deliberately untouched — they are the
+ * store's stock history, not the supplier's paper.
+ */
+export function deleteSupplier(id) {
+  return multiTx([STORES.suppliers, STORES.supplierInvoices, STORES.supplierPayments], 'readwrite', (store) => {
+    store(STORES.suppliers).delete(id);
+    for (const name of [STORES.supplierInvoices, STORES.supplierPayments]) {
+      const req = store(name).openCursor();
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) return;
+        if (cur.value.supplierId === id) cur.delete();
+        cur.continue();
+      };
+    }
+  });
+}
 
 export const listSupplierInvoices = () => getAll(STORES.supplierInvoices);
 export const listSupplierPayments = () => getAll(STORES.supplierPayments);
@@ -524,6 +751,8 @@ export const listSupplierPayments = () => getAll(STORES.supplierPayments);
  * @param {string} inv.supplierId
  * @param {string} [inv.invoiceNo]  the supplier's own printed number
  * @param {Array}  inv.items        [{name, qty, price}] — free text, not SKUs
+ * @param {string} [inv.payStatus]   'carried' | 'partial' | 'full'
+ * @param {number} [inv.paid]        how much of the bill moved at once
  */
 export function createSupplierInvoice(inv) {
   const items = (inv.items || [])
@@ -535,6 +764,7 @@ export function createSupplierInvoice(inv) {
     .filter((it) => it.name && it.qty > 0);
 
   const subtotal = round2(items.reduce((t, it) => t + it.qty * it.price, 0));
+  const total = round2(subtotal - (Number(inv.discount) || 0));
 
   const record = {
     id: inv.id || cryptoId(),
@@ -545,7 +775,12 @@ export function createSupplierInvoice(inv) {
     subtotal,
     // A discount the supplier granted on the whole bill.
     discount: round2(Math.min(Number(inv.discount) || 0, subtotal)),
-    total: round2(subtotal - (Number(inv.discount) || 0)),
+    total,
+    // How the bill was settled when it was written down. The money itself lives
+    // in `supplierPayments`, so the balance never has to read this — it is here
+    // so the invoice and the statement can say what happened without guessing.
+    payStatus: inv.payStatus || 'carried',
+    paid: round2(Math.min(Math.max(0, Number(inv.paid) || 0), total)),
     note: inv.note || '',
     createdAt: new Date().toISOString(),
   };
@@ -632,6 +867,12 @@ export const DEFAULT_SETTINGS = {
   phone: '',
   address: '',
   currency: 'ILS',
+  // Money already in the till on the day the app started being used, so the
+  // store balance has a real starting point instead of always reading zero.
+  openingBalance: 0,
+  // Local gate for the sensitive fields in the product form (quantities,
+  // sizes, colours). NOT security — it only stops an accidental edit.
+  editPin: '0000',
   lowStockThreshold: 5,
   logo: '',
   categories: ['قمصان وبلوزات', 'فساتين', 'بناطيل', 'جاكيتات ومعاطف', 'تيشيرتات', 'أحذية وإكسسوارات'],
@@ -652,11 +893,18 @@ export const DEFAULT_SETTINGS = {
 
 export async function getSettings() {
   const rec = await get(STORES.settings, 'app');
-  return { ...DEFAULT_SETTINGS, ...(rec || {}), key: 'app' };
+  return { ...DEFAULT_SETTINGS, ...(rec || {}), key: 'app', currency: 'ILS' };
 }
 
+/**
+ * The currency is not a preference: this app is priced in shekels and the
+ * settings screen no longer offers a choice. Forcing it here means a stale
+ * backup or an old call site cannot reintroduce another symbol.
+ */
 export function saveSettings(patch) {
-  return getSettings().then((cur) => put(STORES.settings, { ...cur, ...patch, key: 'app' }));
+  return getSettings().then((cur) =>
+    put(STORES.settings, { ...cur, ...patch, key: 'app', currency: 'ILS' })
+  );
 }
 
 /* ------------------------------------------------------------------ *
@@ -664,10 +912,11 @@ export function saveSettings(patch) {
  * ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [products, sales, suppliers, supplierInvoices, supplierPayments, settings] =
+  const [products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings] =
     await Promise.all([
       listProducts(),
       listSales(),
+      listPurchases(),
       listSuppliers(),
       listSupplierInvoices(),
       listSupplierPayments(),
@@ -679,6 +928,7 @@ export async function exportAll() {
     exportedAt: new Date().toISOString(),
     products,
     sales,
+    purchases,
     suppliers,
     supplierInvoices,
     supplierPayments,
@@ -686,23 +936,45 @@ export async function exportAll() {
   };
 }
 
-/** Wipes everything then inserts the payload from a backup file. */
+/** What a file has to carry before we are willing to touch the live database. */
+export function validateBackup(data) {
+  if (!data || typeof data !== 'object') return 'ملف النسخة الاحتياطية غير صالح';
+  if (data.app !== 'saher') return 'هذا الملف ليس نسخة احتياطية من متجري';
+  if (!Array.isArray(data.products)) return 'النسخة الاحتياطية لا تحتوي على قائمة المنتجات';
+  if (!Array.isArray(data.sales)) return 'النسخة الاحتياطية لا تحتوي على قائمة الفواتير';
+  // A settings block is what carries the store balance's opening figure; a file
+  // without one would silently reset the shop back to a zero balance.
+  if (data.settings && typeof data.settings !== 'object') return 'بيانات المتجر داخل الملف غير صالحة';
+  return null;
+}
+
+/**
+ * Replaces the database with a backup.
+ *
+ * The clear and the inserts share ONE transaction, so a failure part-way
+ * through rolls the whole thing back and the shop is left exactly as it was —
+ * the previous version wiped every store in separate transactions first, which
+ * could leave an empty database behind if the insert failed.
+ */
 export async function importAll(data) {
-  if (!data || data.app !== 'saher') {
-    throw new Error('ملف النسخة الاحتياطية غير صالح');
-  }
+  const problem = validateBackup(data);
+  if (problem) throw new Error(problem);
+
   const restores = [STORES.products, STORES.sales, STORES.settings];
-  // Only wipe the supplier stores if the backup actually carries them, so a v1
+  // Only wipe the supplier stores if the backup actually carries them, so an old
   // file cannot silently wipe a ledger the user has since entered by hand.
   const hasLedger =
     Array.isArray(data.suppliers) ||
     Array.isArray(data.supplierInvoices) ||
     Array.isArray(data.supplierPayments);
   if (hasLedger) restores.push(STORES.suppliers, STORES.supplierInvoices, STORES.supplierPayments);
-
-  await Promise.all(restores.map((s) => clearStore(s)));
+  // Same reasoning for purchases: a file written before restock existed has none.
+  const hasPurchases = Array.isArray(data.purchases);
+  if (hasPurchases) restores.push(STORES.purchases);
 
   await multiTx(restores, 'readwrite', (store) => {
+    for (const s of restores) store(s).clear();
+
     for (const p of data.products || []) store(STORES.products).put(p);
     // A backup written by an older build still carries customerId/customerName
     // on its sales. The v3 migration already ran, so nothing upstream would
@@ -712,20 +984,31 @@ export async function importAll(data) {
       const { customerId, customerName, ...rest } = s;
       store(STORES.sales).put(rest);
     }
+    for (const p of data.purchases || []) store(STORES.purchases).put(p);
     for (const s of data.suppliers || []) store(STORES.suppliers).put(s);
     for (const s of data.supplierInvoices || []) store(STORES.supplierInvoices).put(s);
     for (const s of data.supplierPayments || []) store(STORES.supplierPayments).put(s);
-    store(STORES.settings).put({ ...DEFAULT_SETTINGS, ...(data.settings || {}), key: 'app' });
+    store(STORES.settings).put({ ...DEFAULT_SETTINGS, ...(data.settings || {}), key: 'app', currency: 'ILS' });
   });
 }
 
+/**
+ * Empties every store, settings included.
+ *
+ * Settings has to be in here: leaving it behind would keep an old
+ * `openingBalance` while every sale and purchase vanished, and the store
+ * balance would report money nobody ever had. A cleared database is a brand
+ * new shop, so it starts from the defaults.
+ */
 export async function clearAll() {
   await Promise.all([
     clearStore(STORES.products),
     clearStore(STORES.sales),
+    clearStore(STORES.purchases),
     clearStore(STORES.suppliers),
     clearStore(STORES.supplierInvoices),
     clearStore(STORES.supplierPayments),
+    clearStore(STORES.settings),
   ]);
 }
 

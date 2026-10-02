@@ -3,16 +3,16 @@
  * Shows today's performance, inventory health, the sales trend and quick actions.
  */
 import { icon } from '../icons.js';
-import { el, fromHTML, clear, escapeHTML, countUp, num, numInt, moneyHTML, fmtDate, fmtDayName, addDays, startOfDay, wait } from '../utils.js';
+import { el, fromHTML, clear, countUp, num, numInt, moneyHTML, fmtDate, fmtDayName, addDays, startOfDay } from '../utils.js';
 import { stockOf } from '../db.js';
 import {
-  loadAll, salesOn, salesBetween, revenue, orderCount, avgBasket,
-  pctChange, dailySeries, hourlySeries, bestSellers, lowStockProducts, discountGiven,
+  loadAll, salesOn, revenue, orderCount, avgBasket,
+  pctChange, dailySeries, hourlySeries, lowStockProducts,
 } from '../analytics.js';
 import { lineChart, destroyCharts } from '../charts.js';
-import { emptyState, loadingRow, openSheet, toast, saleRow } from '../components.js';
+import { emptyState, openSheet, toast, saleRow } from '../components.js';
 import { openInvoiceSheet } from '../invoice-sheet.js';
-import { openStockSheet } from '../stock-sheet.js';
+import { openRestockPicker } from '../restock.js';
 import { navigate } from '../router.js';
 
 let trendWindow = 7; // days shown in the trend chart (7 / 30, or 1 for today)
@@ -38,55 +38,54 @@ export function render() {
 
   // --- skeleton shell: the layout appears instantly, numbers fill in ---
   const statsHost = el('div.stat-grid', { id: 'dash-stats' });
+
+  // After the KPI row the dashboard is exactly two things: the sales trend and
+  // the day's invoices. The stock-alert column, the best-sellers block and the
+  // stock-by-category chart were three more places to look for something the
+  // owner was not asking about.
   const body = el(
-    'div.dash-cols',
+    'div',
     {},
     el(
-      'div',
+      'div.card.chart-card',
       {},
       el(
-        'div.card.chart-card',
+        'div.card-head',
         {},
+        el('h3', { text: 'مسار المبيعات' }),
         el(
-          'div.card-head',
-          {},
-          el('h3', { text: 'مسار المبيعات' }),
-          el(
-            'div.seg',
-            { id: 'trend-seg' },
-            ...[
-              [1, 'اليوم'],
-              [7, 'الأسبوع'],
-              [30, 'الشهر'],
-            ].map(([v, label]) =>
-              el('button', {
-                type: 'button',
-                text: label,
-                class: v === trendWindow ? 'is-active' : '',
-                onClick: () => switchTrend(v),
-                dataset: { win: String(v) },
-              })
-            )
+          'div.seg',
+          { id: 'trend-seg' },
+          ...[
+            [1, 'اليوم'],
+            [7, 'الأسبوع'],
+            [30, 'الشهر'],
+          ].map(([v, label]) =>
+            el('button', {
+              type: 'button',
+              text: label,
+              class: v === trendWindow ? 'is-active' : '',
+              onClick: () => switchTrend(v),
+              dataset: { win: String(v) },
+            })
           )
-        ),
-        el(
-          'div',
-          { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px' },
-          el('span.rate-line', { id: 'trend-total', html: '…' }),
-          el('span.tiny.muted', { id: 'trend-range', text: '' })
-        ),
-        el('div.chart-box', {}, el('canvas', { id: 'trend-chart' })),
-        el(
-          'div.chart-foot',
-          {},
-          el('span', { id: 'trend-note', text: '' }),
-          el('button.card-head__action', { type: 'button', text: 'التقرير الكامل', onClick: () => navigate('reports') })
         )
       ),
-      el('div.card', { id: 'dash-invoices', style: 'margin-top:16px' }),
-      el('div', { id: 'dash-bestsellers', style: 'margin-top:16px' })
+      el(
+        'div',
+        { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px' },
+        el('span.rate-line', { id: 'trend-total', html: '…' }),
+        el('span.tiny.muted', { id: 'trend-range', text: '' })
+      ),
+      el('div.chart-box', {}, el('canvas', { id: 'trend-chart' })),
+      el(
+        'div.chart-foot',
+        {},
+        el('span', { id: 'trend-note', text: '' }),
+        el('button.card-head__action', { type: 'button', text: 'التقرير الكامل', onClick: () => navigate('reports') })
+      )
     ),
-    el('div', { id: 'dash-side' })
+    el('div.card', { id: 'dash-invoices', style: 'margin-top:16px' })
   );
 
   root.appendChild(el('div', { id: 'dash-hero', class: 'hero skeleton', style: 'height:150px' }));
@@ -105,16 +104,17 @@ export function render() {
 
 async function boot(root) {
   const { products, sales, settings } = await loadAll();
-  if (!root.isConnected) return;
+  // Callers pass `document.getElementById(...)`, which is null the moment the
+  // user leaves the dashboard — e.g. the restock picker's onDone firing after a
+  // sheet was opened from somewhere else. Nothing to repaint, so just stop.
+  if (!root || !root.isConnected) return;
 
   const cur = settings.currency;
   renderHero(root, products, sales, settings);
   renderDayNav(root);
   renderStats(root, sales, products, settings);
-  renderQuick(root, products);
+  renderQuick(root);
   renderDayInvoices(root, sales, settings);
-  renderSide(root, products, sales, settings);
-  renderBestSellers(root, sales, cur);
 
   destroyCharts();
   drawTrend(root, sales, cur);
@@ -258,7 +258,7 @@ function renderStats(root, sales, products, settings) {
         ? el('span', { text: `الحد الأدنى ${threshold} قطع` })
         : el('span.delta.delta--up', { text: 'المخزون سليم' }),
       extra: `${products.length} منتج`,
-      onClick: () => openStockSheet({ products, focusCategory: lowList[0]?.category, onChanged: refresh }),
+      onClick: () => navigate('products'),
     },
     {
       label: 'إجمالي المخزون',
@@ -268,7 +268,7 @@ function renderStats(root, sales, products, settings) {
       tone: 'emerald',
       foot: el('span', { text: `${products.length} منتج` }),
       extra: `${products.filter((p) => stockOf(p) === 0).length} نفدت`,
-      onClick: () => openStockSheet({ products, onChanged: refresh }),
+      onClick: () => navigate('products'),
     },
   ];
 
@@ -335,14 +335,40 @@ function renderDayInvoices(root, sales, settings) {
     if (r && r.isConnected) boot(r);
   };
 
+  // Its own day stepper, inside the section it changes: walking to yesterday's
+  // invoices should not mean scrolling back to the top of the screen first.
+  const today = isToday(viewDate);
+  const stepper = el(
+    'div.inv-daynav',
+    {},
+    el(
+      'button.icon-btn.icon-btn--sm',
+      {
+        type: 'button',
+        'aria-label': 'اليوم التالي',
+        title: 'اليوم التالي',
+        disabled: today ? '' : null,
+        onClick: () => setDay(1),
+      },
+      fromHTML(icon('chevronLeft'))
+    ),
+    el('span.inv-daynav__label', {
+      text: today ? 'اليوم' : `${fmtDayName(viewDate)} · ${fmtDate(viewDate)}`,
+    }),
+    el(
+      'button.icon-btn.icon-btn--sm',
+      { type: 'button', 'aria-label': 'اليوم السابق', title: 'اليوم السابق', onClick: () => setDay(-1) },
+      fromHTML(icon('chevronRight'))
+    )
+  );
+
   host.appendChild(
     el(
       'div.card-head',
       {},
-      el('h3', { text: isToday(viewDate) ? 'فواتير اليوم' : `فواتير ${fmtDate(viewDate)}` }),
-      daySales.length
-        ? el('span.tiny.muted', { text: `${daySales.length} فاتورة` })
-        : null
+      el('h3', { text: today ? 'فواتير اليوم' : `فواتير ${fmtDate(viewDate)}` }),
+      stepper,
+      daySales.length ? el('span.tiny.muted', { text: `${daySales.length} فاتورة` }) : null
     )
   );
 
@@ -408,18 +434,16 @@ function openDayInvoices(daySales, day, cur, refresh) {
 }
 
 /* --- quick actions ------------------------------------------------- */
-function renderQuick(root, products) {
+function renderQuick(root) {
   const host = root.querySelector('#dash-quick');
   clear(host);
-  const refresh = () => {
-    const r = document.getElementById('screen-dashboard');
-    if (r && r.isConnected) boot(r);
-  };
-  // Every action carries a tone. Three of the five had none, so the row read as
-  // five identical grey slabs directly under four grey stat tiles.
+  // Every action carries a tone so the row does not read as five identical grey
+  // slabs directly under four grey stat tiles.
   const actions = [
     { label: 'بيع جديد', icon: 'cart', to: 'pos', cls: 'quick--primary', onClick: null },
-    { label: 'رفع المخزون', icon: 'package', to: null, cls: 'quick--emerald', onClick: () => openStockSheet({ products, onChanged: refresh }) },
+    // Opens the real restock flow: pick the product, then the variant, price,
+    // supplier and date. It is a purchase, so it also debits the store balance.
+    { label: 'تجديد الكمية', icon: 'package', to: null, cls: 'quick--emerald', onClick: () => openRestockPicker({ onDone: () => boot(document.getElementById('screen-dashboard')) }) },
     { label: 'إضافة منتج', icon: 'plus', to: 'product/new', cls: 'quick--brass', onClick: null },
     { label: 'مورد جديد', icon: 'truck', to: 'suppliers', cls: 'quick--info', onClick: null },
     { label: 'التقارير', icon: 'chart', to: 'reports', cls: 'quick--primary', onClick: null },
@@ -431,164 +455,6 @@ function renderQuick(root, products) {
         { type: 'button', onClick: () => (a.onClick ? a.onClick() : navigate(a.to)) },
         el('span.quick__ico', {}, fromHTML(icon(a.icon))),
         el('span', { text: a.label })
-      )
-    )
-  );
-}
-
-/* --- side column: low stock --------------------------------------- */
-function renderSide(root, products, sales, settings) {
-  const host = root.querySelector('#dash-side');
-  clear(host);
-  const cur = settings.currency;
-
-  const threshold = Number(settings.lowStockThreshold) || 5;
-  const low = lowStockProducts(products, threshold);
-
-  const card = el(
-    'div.card.card--pad',
-    {},
-    el(
-      'div.card-head',
-      {},
-      fromHTML(icon('alert', undefined, '')),
-      el('h3', { text: 'تنبيهات المخزون العاجلة' }),
-      low.length ? el('span.count', { style: 'font-size:11px', text: String(low.length) }) : null,
-      el('button.card-head__action', { type: 'button', text: 'عرض الكل', onClick: () => navigate('products') })
-    ),
-    el('div', { id: 'low-list' })
-  );
-  host.appendChild(card);
-
-  // inventory snapshot
-  const byCat = new Map();
-  for (const p of products) byCat.set(p.category, (byCat.get(p.category) || 0) + stockOf(p));
-  const topCats = [...byCat.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-
-  if (topCats.length) {
-    host.appendChild(
-      el(
-        'div.card.card--pad',
-        { style: 'margin-top:16px' },
-        el(
-          'div.card-head',
-          {},
-          fromHTML(icon('layers')),
-          el('h3', { text: 'المخزون حسب التصنيف' })
-        ),
-        el(
-          'div',
-          {},
-          ...topCats.map(([name, qty]) => {
-            const max = topCats[0][1] || 1;
-            return el(
-              'div',
-              { style: 'margin-bottom:11px' },
-              el(
-                'div',
-                { style: 'display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:5px' },
-                el('span', { style: 'font-weight:600', text: name }),
-                el('span.muted', { text: `${qty} قطعة` })
-              ),
-              el('div.bar', {}, el('i', { style: `width:${Math.max(6, (qty / max) * 100)}%` }))
-            );
-          })
-        )
-      )
-    );
-  }
-
-  const listHost = host.querySelector('#low-list');
-  clear(listHost);
-
-  if (!products.length) {
-    listHost.appendChild(
-      emptyState({
-        iconName: 'package',
-        title: 'لا توجد منتجات بعد',
-        text: 'أضف أول منتج لتبدأ في متابعة المخزون.',
-        small: true,
-        action: el('button.btn.btn--primary.btn--sm', { type: 'button', onClick: () => navigate('product/new') }, fromHTML(icon('plus')), el('span', { text: 'إضافة منتج' })),
-      })
-    );
-    return;
-  }
-
-  if (!low.length) {
-    listHost.appendChild(
-      el(
-        'div',
-        { style: 'display:flex;gap:11px;align-items:center;padding:14px;border-radius:12px;background:var(--success-tint)' },
-        fromHTML(icon('checkCircle')),
-        el('div', {}, el('b', { style: 'font-size:14px', text: 'كل شيء متوفر' }), el('div.tiny', { style: 'color:var(--success);margin-top:2px', text: `لا يوجد منتج تحت حد النقص (${threshold})` }))
-      )
-    );
-    return;
-  }
-
-  low.slice(0, 6).forEach(({ product, stock }) => {
-    listHost.appendChild(
-      el(
-        'div.lowstock-item',
-        {},
-        product.image
-          ? el('img.thumb', { src: product.image, alt: '' })
-          : el('div.thumb.thumb-ph', {}, fromHTML(icon('hanger'))),
-        el(
-          'div.lowstock-item__main',
-          {},
-          el('div.lowstock-item__name.truncate', { text: product.name }),
-          // `html`, not `text`: moneyHTML returns a currency chip. The product
-          // name/category are user input, so they are escaped before embedding.
-          el('div.lowstock-item__meta', { html: `${escapeHTML(product.category)} · ${moneyHTML(product.price, cur)}` })
-        ),
-        el('span.lowstock-item__qty', { text: stock === 0 ? 'نفدت' : `${stock}` }),
-        el('button.btn.btn--sm.btn--tint', { type: 'button', onClick: () => navigate(`product/${product.id}`) }, fromHTML(icon('pencil')), el('span', { text: 'طلب' }))
-      )
-    );
-  });
-}
-
-/* --- best sellers --------------------------------------------------- */
-function renderBestSellers(root, sales, cur) {
-  const host = root.querySelector('#dash-bestsellers');
-  clear(host);
-  const top = bestSellers(sales, 4);
-  if (!top.length) return;
-
-  host.appendChild(
-    el(
-      'div.card.card--pad',
-      {},
-      el(
-        'div.card-head',
-        {},
-        fromHTML(icon('star')),
-        el('h3', { text: 'الأكثر مبيعاً' }),
-        el('button.card-head__action', { type: 'button', text: 'التقارير', onClick: () => navigate('reports') })
-      ),
-      el(
-        'div.rank-list',
-        {},
-        ...top.map((p, i) =>
-          el(
-            'div.rank',
-            { style: `animation-delay:${i * 55}ms` },
-            el('span.rank__n', { text: String(i + 1) }),
-            el(
-              'div.rank__main',
-              {},
-              el('div.rank__name', { text: p.name }),
-              el('div.bar.rank__bar', {}, el('i', { style: `width:${Math.max(8, (p.revenue / top[0].revenue) * 100)}%` }))
-            ),
-            el(
-              'div.rank__val',
-              {},
-              el('span', { html: moneyHTML(p.revenue, cur) }),
-              el('small', { text: `${p.qty} قطعة` })
-            )
-          )
-        )
       )
     )
   );

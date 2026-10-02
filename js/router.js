@@ -11,6 +11,8 @@
 import { icon } from './icons.js';
 import { clear, escapeHTML, fromHTML } from './utils.js';
 import { stockOf } from './db.js';
+// cart-store.js imports nothing, so reading the basket from here adds no cycle.
+import { totalItems, isPanelOpen, setPanelOpen } from './cart-store.js';
 
 import dashboardScreen from './screens/dashboard.js';
 import productsScreen from './screens/products.js';
@@ -48,17 +50,23 @@ export const ROUTES = [
  * `flex: 1 1 0` items, so it absorbs the extra destination without any
  * layout change.
  *
- * Settings is deliberately NOT here. Six destinations left ~58px per item on a
- * 360px phone, which is under the 48px comfortable touch target once the label
- * is accounted for, and the bar carries the daily workflow only. Settings stays
- * in SIDE_NAV for desktop and is one tap away on mobile from the two controls
- * main.js already puts in the topbar (the store pill and the settings icon-btn),
- * so nothing becomes unreachable.
+ * Settings is deliberately NOT here. Six destinations is the most a 360px
+ * phone can carry before each item drops under the 48px comfortable touch
+ * target once the label is accounted for, and the bar carries the daily
+ * workflow only. Settings stays
+ * in SIDE_NAV for desktop and is one tap away on mobile from the settings
+ * icon-btn main.js puts in the topbar, so nothing becomes unreachable.
+ *
+ * The cart button is not a destination either. It opens the floating basket,
+ * which lives above the bottom bar on every screen, and it keeps a live count
+ * of what is in the invoice in progress — so it works with an empty basket
+ * too, showing an explicit empty state instead of doing nothing at all.
  */
 export const BOTTOM_NAV = [
   { id: 'dashboard', label: 'الرئيسية', icon: 'dashboard', href: '#/dashboard' },
   { id: 'products', label: 'المخزن', icon: 'package', href: '#/products' },
   { id: 'pos', label: 'بيع جديد', icon: 'store', href: '#/pos', primary: true },
+  { id: 'cart', label: 'السلة', icon: 'cart', action: 'cart' },
   { id: 'suppliers', label: 'الموردون', icon: 'truck', href: '#/suppliers' },
   { id: 'reports', label: 'التقارير', icon: 'chart', href: '#/reports' },
 ];
@@ -78,6 +86,7 @@ const TRANSITION_MS = 170;
 let currentRoute = null;      // { path, route, params, order }
 let lastOrder = 0;
 let lowStockCount = 0;
+let cartCount = 0;
 const listeners = new Set();
 
 export function onRoute(fn) {
@@ -116,6 +125,24 @@ function match(path) {
  * ------------------------------------------------------------------ */
 
 function buildNavItem(item, activeId) {
+  // The cart entry is a button, not a link: it opens the floating basket in
+  // place — on any screen, with or without anything in it — instead of routing
+  // somewhere. Everything else stays a normal hash link.
+  if (item.id === 'cart') {
+    const n = cartCount;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'nav-item nav-item--cart' + (n > 0 ? ' is-live' : '');
+    btn.dataset.nav = 'cart';
+    btn.innerHTML =
+      icon(item.icon) +
+      `<span>${escapeHTML(item.label)}</span>` +
+      (n > 0 ? `<span class="nav-item__badge nav-item__badge--cart">${n}</span>` : '');
+    btn.setAttribute('aria-label', n > 0 ? `السلة — ${n} قطعة` : 'السلة — فارغة');
+    btn.addEventListener('click', () => setPanelOpen(!isPanelOpen()));
+    return btn;
+  }
+
   const a = document.createElement('a');
   a.className = 'nav-item' + (item.primary ? ' nav-item--primary' : '') + (item.id === activeId ? ' is-active' : '');
   a.href = item.href;
@@ -157,6 +184,20 @@ export function setLowStockCount(n) {
   lowStockCount = n;
   const active = document.querySelector('.bottomnav .nav-item.is-active')?.dataset.nav;
   renderNav(active || currentRoute?.route.nav || 'dashboard');
+}
+
+/**
+ * Keeps the cart button's badge in step with the basket. Only that one button
+ * is rebuilt — a full renderNav() on every quantity change would rip the nav
+ * out from under a finger that is mid-tap.
+ */
+export function setCartCount(n) {
+  const next = Number(n) || 0;
+  if (cartCount === next) return;
+  cartCount = next;
+  const btn = document.querySelector('.bottomnav .nav-item--cart');
+  if (!btn) return;
+  btn.replaceWith(buildNavItem(BOTTOM_NAV.find((i) => i.id === 'cart'), ''));
 }
 
 /* ------------------------------------------------------------------ *

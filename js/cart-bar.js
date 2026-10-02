@@ -18,17 +18,16 @@ import { el, fromHTML, clear, moneyHTML } from './utils.js';
 import { icon } from './icons.js';
 import { toast, confirmDialog } from './components.js';
 import { getSettings } from './db.js';
-import { navigate } from './router.js';
+import { navigate, setCartCount } from './router.js';
 import {
   cart, subtotal, discountAmount, grandTotal, totalItems,
   setQty, removeLine, clearCart, subscribe, emit,
+  isPanelOpen, setPanelOpen,
 } from './cart-store.js';
 
 let currency = 'ILS';
 let currencyLoaded = false;
 
-/** 'collapsed' | 'open' */
-let open = false;
 let currentPath = '';
 
 let bar = null;
@@ -149,30 +148,31 @@ function paintBar() {
   if (!bar) return;
   const count = totalItems();
   const empty = count === 0;
+  setCartCount(count);
 
-  // An empty cart has nothing worth a permanent strip of screen.
+  // The collapsed peek is a waste of screen when there is nothing in the
+  // basket — but the PANEL is independent of it, so the bottom-nav cart button
+  // can still open it and show the empty state.
   bar.classList.toggle('is-hidden', empty);
   document.body.classList.toggle('has-cartbar', !empty);
-  const showPanel = open && !empty;
+
+  const showPanel = isPanelOpen();
   panel.classList.toggle('is-open', showPanel);
   scrim.classList.toggle('is-on', showPanel);
 
-  if (empty) {
-    if (open) setOpen(false);
-    return;
+  if (!empty) {
+    clear(bar);
+    bar.appendChild(
+      el(
+        'button.cb-peek',
+        { type: 'button', 'aria-expanded': showPanel ? 'true' : 'false', onClick: () => setOpen(!showPanel) },
+        el('span.cb-peek__badge', { text: String(count) }),
+        el('span.cb-peek__label', { text: showPanel ? 'إخفاء السلة' : 'عرض السلة' }),
+        el('span.cb-peek__total', { html: moneyHTML(grandTotal(), currency) }),
+        el('span.cb-peek__chev', {}, fromHTML(icon(showPanel ? 'chevronDown' : 'chevronUp')))
+      )
+    );
   }
-
-  clear(bar);
-  bar.appendChild(
-    el(
-      'button.cb-peek',
-      { type: 'button', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpen(!open) },
-      el('span.cb-peek__badge', { text: String(count) }),
-      el('span.cb-peek__label', { text: open ? 'إخفاء السلة' : 'عرض السلة' }),
-      el('span.cb-peek__total', { html: moneyHTML(grandTotal(), currency) }),
-      el('span.cb-peek__chev', {}, fromHTML(icon(open ? 'chevronDown' : 'chevronUp')))
-    )
-  );
 
   paintPanel();
 }
@@ -182,22 +182,25 @@ function paintBar() {
  * ------------------------------------------------------------------ */
 
 function setOpen(next) {
-  if (open === next) return;
-  open = next;
-  paintBar();
+  clearTimeout(peekTimer);
+  peekTimer = null;
+  setPanelOpen(next);
 }
 
 /**
  * Called after the cart changes. `added` distinguishes "the user just added
- * something" (peek the basket open so the addition is visible) from a plain
- * edit (leave it as the user left it).
+ * something" (expand the basket briefly so the addition is visible, then fold
+ * it back) from a plain edit (leave it as the user left it).
  */
-function onCartChange(added) {
-  if (added && cart.length) {
+function onCartChange(reason) {
+  if (reason === 'panel') {
+    paintBar();
+    return;
+  }
+  if (reason === 'added' && cart.length) {
     setOpen(true);
-    clearTimeout(peekTimer);
     // fall back to collapsed so the bar is not covering the screen by default
-    peekTimer = setTimeout(() => setOpen(false), 2600);
+    peekTimer = setTimeout(() => setPanelOpen(false), 2600);
   }
   paintBar();
 }
@@ -222,12 +225,16 @@ function onCheckout() {
 export function syncRoute(path) {
   currentPath = path || currentPath;
   if (!cart.length) {
-    setOpen(false);
+    clearTimeout(peekTimer);
+    peekTimer = null;
+    setPanelOpen(false);
+    paintBar();
     return;
   }
-  // Moving to another screen folds the bar away; on POS it stays as it is,
-  // because the full cart column is already on screen there.
-  if (currentPath !== 'pos') setOpen(false);
+  // Walking away from the screen folds the basket back into its compact bar —
+  // but nothing here can *hide* it: the cart is a floating affordance on every
+  // screen, POS included, and it stays exactly as the user left it otherwise.
+  if (currentPath !== 'pos') setPanelOpen(false);
   paintBar();
 }
 

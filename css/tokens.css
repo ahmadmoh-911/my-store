@@ -31,7 +31,11 @@
   /* --- ink -------------------------------------------------------------- */
   --ink: #f5f5f7;              /* headers, titles, dominant figures           */
   --ink-2: #b4b4bd;            /* metadata, labels, nav items                */
-  --ink-3: #7a7a86;            /* captions, timestamps, placeholders         */
+  /* Captions, timestamps, placeholders. Nudged up from #7a7a86: at that value
+     the muted text measured 4.34:1 on the card surface, just under the 4.5
+     WCAG AA floor, and this token carries the smallest text in the app. The
+     change is two units per channel and clears AA on every surface tone. */
+  --ink-3: #82828e;
   --ink-on-primary: #ffffff;
 
   /* --- brand ------------------------------------------------------------ */

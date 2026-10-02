@@ -10,6 +10,7 @@ import { listProducts, saveProduct, stockOf, deleteProduct, getSettings } from '
 import { lowStockProducts } from '../analytics.js';
 import { pageHead, emptyState, skeletonGrid, openSheet, confirmDialog, toast, sectionTitle } from '../components.js';
 import { scanBarcode, reportMissing } from '../scanner.js';
+import { openRestockSheet } from '../restock.js';
 import { PREFILL_KEY } from './product-form.js';
 import { navigate } from '../router.js';
 
@@ -47,9 +48,6 @@ export function render() {
       title: 'المنتجات',
       sub: 'إدارة المخزون والأسعار والمقاسات',
       badge: el('span.count', { id: 'products-count', text: '…' }),
-      actions: [
-        el('button.btn.btn--primary', { type: 'button', onClick: () => navigate('product/new') }, fromHTML(icon('plus')), el('span', { text: 'منتج جديد' })),
-      ],
     })
   );
 
@@ -122,17 +120,26 @@ export function render() {
   );
 
   const scanBtn = el(
-    'button.pill-btn.pill-btn--scan',
+    'button.pill-btn.pill-btn--scan.pill-btn--lg',
     { type: 'button', id: 'scan-btn', onClick: () => handleScan(root) },
     fromHTML(icon('barcode')),
-    el('span', { text: 'مسح' })
+    el('span', { text: 'مسح الباركود' })
   );
 
+  const addBtn = el(
+    'button.pill-btn.pill-btn--lg.pill-btn--add',
+    { type: 'button', id: 'add-btn', onClick: () => navigate('product/new') },
+    fromHTML(icon('plus')),
+    el('span', { text: 'إضافة بضاعة جديدة' })
+  );
+
+  root.appendChild(el('div.stat-grid.stat-grid--inv', { id: 'inv-stats' }));
   root.appendChild(
     el(
       'div.products-toolbar',
       {},
       el('div.products-toolbar__row', {}, searchBox, scanBtn, sortBtn, filterBtn, viewToggle),
+      el('div.products-toolbar__actions', {}, addBtn),
       el('div.chip-row', { id: 'category-chips' })
     )
   );
@@ -181,8 +188,69 @@ async function paint(screenRoot) {
     cache = { products, settings };
   }
 
+  renderInvStats(root);
   renderChips(root);
   renderResults(root, host);
+}
+
+/**
+ * Three numbers the owner checks before anything else: how many pieces are on
+ * the shelf, how many models those are, and how many need reordering. The
+ * "needs reordering" count uses the existing low-stock threshold — no second,
+ * competing definition of "low".
+ */
+function renderInvStats(root) {
+  const host = root.querySelector('#inv-stats');
+  if (!host) return;
+  clear(host);
+
+  const threshold = Number(cache.settings?.lowStockThreshold) || 5;
+  const pieces = cache.products.reduce((t, p) => t + stockOf(p), 0);
+  // "قارب على النفاد" is the near-out band only: things that still have stock
+  // but sit at or below the existing threshold. A fully empty product is a
+  // different state and already carries its "نفدت" badge on the card.
+  const low = lowStockProducts(cache.products, threshold).filter((x) => x.stock > 0);
+
+  const tile = (label, value, unit, iconName, tone, onClick) => {
+    const node = el(
+      `div.stat.stat--slim${onClick ? '.stat--tap' : ''}`,
+      onClick
+        ? {
+            role: 'button',
+            tabindex: '0',
+            title: label,
+            onClick,
+            onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && onClick(),
+          }
+        : {}
+    );
+    node.appendChild(
+      el(
+        'div.stat__top',
+        {},
+        el(`div.stat__icon.stat__icon--sm${tone ? '.stat__icon--' + tone : ''}`, {}, fromHTML(icon(iconName))),
+        el('div.stat__label', { text: label })
+      )
+    );
+    node.appendChild(
+      el('div.stat__value', {}, el('span', { text: String(value) }), unit ? el('small', { text: unit }) : null)
+    );
+    return node;
+  };
+
+  host.appendChild(tile('إجمالي القطع', pieces, 'قطعة', 'package', 'emerald', null));
+  host.appendChild(tile('عدد الموديلات', cache.products.length, 'منتج', 'layers', 'brass', null));
+  host.appendChild(
+    tile('قارب على النفاد', low.length, 'منتج', 'alert', 'danger', low.length ? () => openStockFilter(root) : null)
+  );
+}
+
+/** Jumps the list straight to the low / near-out products. */
+function openStockFilter(root) {
+  state.stock = 'low';
+  root.querySelector('#filter-btn')?.classList.add('is-on');
+  paint(root);
+  root.querySelector('#result-line')?.scrollIntoView({ block: 'center' });
 }
 
 function renderChips(root) {
@@ -346,6 +414,15 @@ function productCard(p, cur, threshold, index) {
   const stock = stockOf(p);
   const sizes = sizesOf(p);
 
+  const restock = (e) => {
+    e.stopPropagation();
+    openRestockSheet(p, { onDone: () => paint() });
+  };
+  const edit = (e) => {
+    e.stopPropagation();
+    navigate(`product/${p.id}`);
+  };
+
   return el(
     'article.pcard',
     {
@@ -376,22 +453,19 @@ function productCard(p, cur, threshold, index) {
       sizes.length
         ? el('div.pcard__sizes', {}, ...sizes.slice(0, 5).map((s) => el('span.size-pill', { text: s })))
         : el('div.pcard__sizes', {}, el('span.muted', { text: 'بدون مقاسات' })),
+      el('div.pcard__stockline', { text: stock === 0 ? 'نفدت الكمية' : `${stock} قطعة متاحة` }),
       el(
         'div.pcard__foot',
         {},
-        el('span.pcard__price', { html: `${numInt(p.price)}<small>${escapeHTML(cur)}</small>` }),
-        el(
-          'button.pcard__add',
-          {
-            type: 'button',
-            'aria-label': 'بيع هذا المنتج',
-            onClick: (e) => {
-              e.stopPropagation();
-              navigate(`pos/${p.id}`);
-            },
-          },
-          fromHTML(icon('plus'))
-        )
+        el('span.pcard__price', { html: `${numInt(p.price)}<small>${escapeHTML(cur)}</small>` })
+      ),
+      el(
+        'div.pcard__acts',
+        {},
+        el('button.pill-btn.pill-btn--sm.pill-btn--restock', { type: 'button', onClick: restock },
+          fromHTML(icon('box')), el('span', { text: 'تجديد الكمية' })),
+        el('button.pill-btn.pill-btn--sm.pill-btn--edit', { type: 'button', onClick: edit },
+          fromHTML(icon('pencil')), el('span', { text: 'تعديل البيانات' }))
       )
     )
   );
@@ -437,7 +511,19 @@ function productRow(p, cur, threshold, index) {
       'div.prow__end',
       {},
       el('span.prow__price', { html: `${numInt(p.price)}<small>${escapeHTML(cur)}</small>` }),
-      stockBadge(stock, threshold, p.createdAt)
+      stockBadge(stock, threshold, p.createdAt),
+      el(
+        'div.prow__acts',
+        {},
+        el('button.pill-btn.pill-btn--sm.pill-btn--restock', {
+          type: 'button',
+          onClick: (e) => { e.stopPropagation(); openRestockSheet(p, { onDone: () => paint() }); },
+        }, fromHTML(icon('box')), el('span', { text: 'تجديد' })),
+        el('button.pill-btn.pill-btn--sm.pill-btn--edit', {
+          type: 'button',
+          onClick: (e) => { e.stopPropagation(); navigate(`product/${p.id}`); },
+        }, fromHTML(icon('pencil')), el('span', { text: 'تعديل' }))
+      )
     )
   );
 }

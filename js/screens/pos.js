@@ -40,6 +40,9 @@ const activeScreens = [];
 export function render(params = []) {
   const root = el('div.screen', { id: 'screen-pos' });
 
+  // POS is sale-only. Sale history belongs to Reports, and registering a
+  // product belongs to Inventory — both were shortcuts here that could only
+  // take the owner out of the sale they were in the middle of.
   const head = el(
     'div.page-head',
     {},
@@ -48,12 +51,6 @@ export function render(params = []) {
       {},
       el('h1.page-title', {}, el('span', { text: 'نقطة البيع' }), el('span.badge.badge--primary', { id: 'pos-count', text: 'سلة فارغة' })),
       el('p.page-sub', { text: 'اضغط على المنتج لإضافته إلى السلة' })
-    ),
-    el(
-      'div.page-head__actions',
-      {},
-      el('button.btn.btn--soft', { type: 'button', onClick: () => navigate('reports') }, fromHTML(icon('receipt')), el('span', { text: 'السجل' })),
-      el('button.btn.btn--primary', { type: 'button', onClick: () => navigate('product/new') }, fromHTML(icon('plus')), el('span', { text: 'منتج' }))
     )
   );
   root.appendChild(head);
@@ -192,8 +189,7 @@ async function paintProducts(screenRoot) {
       emptyState({
         iconName: 'hanger',
         title: 'لا توجد منتجات للبيع',
-        text: 'أضف منتجات أولاً لتتمكن من إجراء المبيعات.',
-        action: el('button.btn.btn--primary', { type: 'button', onClick: () => navigate('product/new') }, fromHTML(icon('plus')), el('span', { text: 'إضافة منتج' })),
+        text: 'سجّل منتجاتك من شاشة المخزن لتتمكن من إجراء المبيعات.',
       })
     );
     return;
@@ -209,13 +205,17 @@ async function paintProducts(screenRoot) {
     const stock = stockOf(p);
     const sizes = [...new Set(availableVariants(p).map((v) => v.size))].filter(Boolean);
 
+    // The card opens a read-only detail sheet; the button on it is the quick
+    // path straight into the variant picker.
     grid.appendChild(
       el(
-        `button.pos-item${stock === 0 ? '.is-out' : ''}`,
+        'div.pos-item',
         {
-          type: 'button',
+          role: 'button',
+          tabindex: '0',
           style: `animation-delay:${Math.min(i * 28, 240)}ms`,
-          onClick: () => pickProduct(p),
+          onClick: () => openProductSheet(p),
+          onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && openProductSheet(p),
         },
         el(
           'div.pos-item__media',
@@ -235,15 +235,151 @@ async function paintProducts(screenRoot) {
           el(
             'div.pos-item__foot',
             {},
-            el('span.pos-item__price', { html: `${numInt(p.price)}<small style="font-size:10px;color:var(--ink-3)"> ${escapeHTML(cache.settings.currency)}</small>` }),
-            el('span.pos-item__plus', {}, fromHTML(icon('plus')))
-          )
+            el('span.pos-item__price', { html: `${numInt(p.price)}<small style="font-size:10px;color:var(--ink-3)"> ${escapeHTML(cache.settings.currency)}</small>` })
+          ),
+          stock === 0
+            ? el('div.pos-item__add.is-off', {}, fromHTML(icon('x')), el('span', { text: 'نفدت الكمية' }))
+            : el(
+                'button.pos-item__add',
+                {
+                  type: 'button',
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    pickProduct(p);
+                  },
+                },
+                fromHTML(icon('cart')),
+                el('span', { text: 'أضف إلى السلة' })
+              )
         )
       )
     );
   });
 
   host.appendChild(grid);
+}
+
+/* ------------------------------------------------------------------ *
+ * Read-only product details
+ *
+ * Tapping a POS card opens what the piece IS — name, image, price, sizes,
+ * colours and the quantity of each variant — and lets the owner put it in the
+ * basket. There is deliberately no field to type into here: prices, stock and
+ * variants are edited in Inventory, never while a sale is open.
+ * ------------------------------------------------------------------ */
+function openProductSheet(p) {
+  const cur = cache.settings?.currency || 'ILS';
+  const groups = new Map(); // size → variants
+  for (const v of p.variants || []) {
+    const s = v.size || '—';
+    if (!groups.has(s)) groups.set(s, []);
+    groups.get(s).push(v);
+  }
+
+  let chosenSize = [...groups.keys()][0];
+  let chosenColor = groups.get(chosenSize)?.[0]?.color || '—';
+
+  const sizesHost = el('div.opt-wrap');
+  const colorsHost = el('div.opt-wrap');
+  const stockHost = el('div.pos-item__stock');
+
+  function paintSizes() {
+    clear(sizesHost);
+    for (const s of groups.keys()) {
+      sizesHost.appendChild(
+        el(`button.opt${chosenSize === s ? '.is-on' : ''}`, {
+          type: 'button',
+          text: s === '—' ? 'مقاس واحد' : s,
+          onClick: () => {
+            chosenSize = s;
+            chosenColor = groups.get(s)[0].color || '—';
+            paintSizes();
+            paintColors();
+            paintStock();
+          },
+        })
+      );
+    }
+  }
+
+  function paintColors() {
+    clear(colorsHost);
+    const list = groups.get(chosenSize) || [];
+    if (list.length <= 1) {
+      colorsHost.appendChild(el('span.tiny.muted', { text: 'بدون ألوان متعددة' }));
+      return;
+    }
+    for (const v of list) {
+      const name = v.color || '—';
+      const cdef = (cache.settings.colors || []).find((c) => c.name === name);
+      colorsHost.appendChild(
+        el(`button.opt${chosenColor === name ? '.is-on' : ''}`, {
+          type: 'button',
+          onClick: () => { chosenColor = name; paintColors(); paintStock(); },
+        },
+          cdef ? el('i.swatch', { style: `background:${cdef.hex};width:15px;height:15px` }) : null,
+          el('span', { text: name }),
+          el('span.tiny', { style: 'opacity:.7', text: `${Number(v.quantity) || 0} متاح` })
+        )
+      );
+    }
+  }
+
+  function chosenVariant() {
+    return (groups.get(chosenSize) || []).find((x) => (x.color || '—') === chosenColor) || null;
+  }
+
+  function paintStock() {
+    const v = chosenVariant();
+    const n = v ? Number(v.quantity) || 0 : 0;
+    clear(stockHost);
+    stockHost.appendChild(
+      el(
+        'div.pos-item__stockrow',
+        {},
+        el('span', { text: [v?.size || 'مقاس واحد', v?.color || 'بدون لون'].join(' · ') }),
+        el('span', { class: n > 0 ? 'pos-item__stock--ok' : 'pos-item__stock--out', text: n > 0 ? `${n} قطعة متاحة` : 'غير متوفر — اختر آخر' })
+      )
+    );
+    if (addBtn) addBtn.disabled = n <= 0;
+  }
+
+  const addBtn = el('button.btn.btn--primary.btn--block.btn--lg', { type: 'button', text: 'أضف إلى السلة' });
+
+  const body = el(
+    'div',
+    {},
+    el(
+      'div',
+      { style: 'display:flex;gap:13px;align-items:center;margin-bottom:16px' },
+      p.image
+        ? el('img.thumb.thumb--lg', { src: p.image, alt: '' })
+        : el('div.thumb.thumb--lg.thumb-ph', {}, fromHTML(icon('hanger'))),
+      el(
+        'div',
+        { style: 'min-width:0' },
+        el('b', { style: 'font-size:17px;display:block', text: p.name }),
+        el('span.tiny.muted', { html: `${moneyHTML(p.price, cur)} · ${escapeHTML(p.category || '')}` })
+      )
+    ),
+    el('div.field', {}, el('label.field__label', { text: 'المقاس' }), sizesHost),
+    el('div.field', {}, el('label.field__label', { text: 'اللون' }), colorsHost),
+    stockHost,
+    el('p.tiny.muted', { style: 'margin-top:14px', text: 'تفاصيل فقط — تعديل الأسعار والمقاسات من شاشة المخزن.' })
+  );
+
+  paintSizes();
+  paintColors();
+  paintStock();
+
+  const sheet = openSheet({ title: 'تفاصيل المنتج', body, foot: addBtn });
+
+  addBtn.addEventListener('click', () => {
+    const v = chosenVariant();
+    if (!v || (Number(v.quantity) || 0) <= 0) return;
+    sheet.close();
+    addItem(p, v);
+  });
 }
 
 /* ------------------------------------------------------------------ *

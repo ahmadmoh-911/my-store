@@ -1,6 +1,9 @@
 /**
- * Settings — store identity, currency/threshold, data backup & restore,
- * PWA install and the destructive "clear everything" action.
+ * Settings — store identity, preferences, data backup & restore, and about.
+ *
+ * Store data is deliberately three fields: name, owner, contact number. The
+ * owner name is what the dashboard greets by, the number is what the receipt
+ * hands back, and the shop name is on every printed page.
  *
  * Backup is the only "sync" mechanism for a single-device app: export a JSON
  * file, copy it anywhere, import it back to restore.
@@ -11,11 +14,11 @@ import {
   pickFile, readFileAsText, debounce, isoDate,
 } from '../utils.js';
 import {
-  getSettings, saveSettings, exportAll, importAll, clearAll,
-  listProducts, listSales, listSuppliers, listSupplierInvoices, listSupplierPayments,
+  getSettings, saveSettings, exportAll, importAll,
+  listProducts, listSales, listSuppliers, listSupplierInvoices, listSupplierPayments, listPurchases,
   DB_NAME, DB_VERSION,
 } from '../db.js';
-import { pageHead, confirmDialog, celebrate, toast } from '../components.js';
+import { pageHead, celebrate, toast } from '../components.js';
 import { navigate } from '../router.js';
 
 export function render() {
@@ -24,7 +27,7 @@ export function render() {
   root.appendChild(
     pageHead({
       title: 'الإعدادات',
-      sub: 'هوية المتجر، العملة والنسخ الاحتياطي',
+      sub: 'بيانات المتجر والتفضيلات والنسخ الاحتياطي',
     })
   );
 
@@ -79,19 +82,65 @@ async function boot(host) {
     );
   }
 
-  /* --- 1 · store identity -------------------------------------------- */
-  const nameInput = textInput(s.storeName, (v) => (s.storeName = v), 'اسم المتجر (يظهر في الفواتير)');
-  const ownerInput = textInput(s.ownerName, (v) => (s.ownerName = v), 'اسم صاحب المتجر (تظهر به في الرئيسية)');
-  const taglineInput = textInput(s.storeTagline, (v) => (s.storeTagline = v), 'وصف قصير');
-  const phoneInput = textInput(s.phone, (v) => (s.phone = v), 'رقم التواصل', 'ltr');
-  const addressInput = textInput(s.address, (v) => (s.address = v), 'العنوان');
+  /* --- 1 · store identity -------------------------------------------- *
+   * Only three things belong to the shop's identity: what it is called, who
+   * runs it, and how you reach them. The owner name is what the dashboard
+   * greets them by; the number is what a receipt hands back. The logo and the
+   * receipt footer moved down into Preferences rather than disappearing — both
+   * were working features, only the grouping was wrong.
+   * ------------------------------------------------------------------ */
+  const nameInput = textInput(s.storeName, (v) => (s.storeName = v), 'مثال: محل النور');
+  const ownerInput = textInput(s.ownerName, (v) => (s.ownerName = v), 'مثال: أحمد المصري');
+  const phoneInput = textInput(s.phone, (v) => (s.phone = v), '05xxxxxxxx', 'ltr');
 
-  const logoPreview = el('img.logo-preview', { src: s.logo || '', alt: '' });
-  if (!s.logo) {
-    logoPreview.replaceWith(
-      el('div.logo-preview.logo-preview-ph', { html: icon('hanger') })
-    );
-  }
+  // Three labelled rows, not three bare placeholders: with only these three
+  // fields left in the group, an unlabelled box would leave the owner guessing
+  // which one is which after the value clears.
+  host.appendChild(
+    group('store', 'بيانات المتجر', 'store', [
+      row('اسم المتجر', 'يظهر أعلى كل فاتورة مطبوعة', nameInput),
+      row('اسم صاحب المتجر', 'تظهر به في ترحيب الشاشة الرئيسية', ownerInput),
+      row('رقم التواصل', 'يظهر أسفل كل فاتورة', phoneInput)
+    ])
+  );
+
+  /* --- 2 · preferences ------------------------------------------------ */
+  const openingInput = el('input.input.input--money', {
+    type: 'number',
+    min: '0',
+    step: '1',
+    placeholder: '0',
+    value: String(s.openingBalance ?? 0),
+    oninput: debounce((e) => {
+      s.openingBalance = Math.max(0, Number(e.target.value) || 0);
+    }, 260),
+  });
+
+  const pinInput = el('input.input', {
+    type: 'text',
+    inputmode: 'numeric',
+    maxlength: '8',
+    placeholder: '0000',
+    value: s.editPin || '0000',
+    style: 'max-width:120px;text-align:center;direction:ltr',
+    oninput: debounce((e) => {
+      s.editPin = e.target.value.replace(/\D/g, '') || '0000';
+    }, 260),
+  });
+
+  const thresholdInput = el('input.input', {
+    type: 'number',
+    min: '0',
+    value: String(s.lowStockThreshold),
+    oninput: debounce((e) => {
+      const v = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
+      s.lowStockThreshold = v;
+    }, 260),
+  });
+
+  const footerInput = textInput(s.receiptFooter, (v) => (s.receiptFooter = v), 'عبارة أسفل الفاتورة');
+
+  const logoSwitch = toggle(s.receiptShowLogo !== false, (on) => (s.receiptShowLogo = on));
 
   const logoBox = el('div.logo-row');
   function paintLogo() {
@@ -127,51 +176,30 @@ async function boot(host) {
   paintLogo();
 
   host.appendChild(
-    group('store', 'بيانات المتجر', 'store', [
-      el('div.settings-body', {},
-        logoBox,
-        el('div', { style: 'height:14px' }),
-        el('div.grid-2', {}, nameInput, ownerInput),
-        el('div.grid-2', {}, taglineInput, phoneInput),
-        el('div.grid-2', {}, addressInput)
-      )
-    ])
-  );
-
-  /* --- 2 · preferences ------------------------------------------------ */
-  const currencyInput = textInput(s.currency, (v) => (s.currency = v), 'رمز العملة', 'ltr');
-  currencyInput.style.maxWidth = '140px';
-  currencyInput.style.textAlign = 'center';
-
-  const thresholdInput = el('input.input', {
-    type: 'number',
-    min: '0',
-    value: String(s.lowStockThreshold),
-    oninput: debounce((e) => {
-      const v = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
-      s.lowStockThreshold = v;
-    }, 260),
-  });
-
-  const footerInput = textInput(s.receiptFooter, (v) => (s.receiptFooter = v), 'عبارة أسفل الفاتورة');
-
-  const logoSwitch = toggle(s.receiptShowLogo !== false, (on) => (s.receiptShowLogo = on));
-
-  host.appendChild(
     group('settings', 'التفضيلات', 'sliders', [
-      row('العملة', 'تظهر بجانب كل الأسعار', currencyInput),
+      row('الرصيد الافتتاحي للمتجر', 'المال الموجود في المتجر قبل أول استخدام للتطبيق', openingInput),
+      el('p.tiny.muted', {
+        style: 'padding:0 15px 12px;margin:-6px 0 0',
+        text: 'الرصيد العام للمتجر = الرصيد الافتتاحي + كل المبيعات − مشتريات تجديد الكمية. عدّله هنا فيظهر في التقارير فوراً.',
+      }),
       row('حد التنبيه للنقص', 'يُعلَّم المنتج عند وصوله لهذا الرقم', thresholdInput),
+      row('رمز تعديل الكميات', 'مطلوب لتغيير مقاسات وألوان وكميات منتج قائم', pinInput),
       row('شعار في الفاتورة', 'إظهار الشعار أعلى نسخة الطباعة', logoSwitch),
-      el('div.settings-body', {}, footerInput)
+      el('div.settings-body', {}, logoBox, el('div', { style: 'height:14px' }), footerInput)
     ])
   );
 
-  /* --- 3 · data & backup ---------------------------------------------- */
+  /* --- 3 · data & backup ---------------------------------------------- *
+   * The backup is a plain JSON file of every store this app keeps, so a second
+   * device that imports it is byte-for-byte the same shop. `purchases` is in
+   * the list because restock records are what the store balance is derived
+   * from — a restore without them would show the right stock and the wrong cash.
+   * ------------------------------------------------------------------ */
   const stats = await Promise.all([
-    listProducts(), listSales(), listSuppliers(), listSupplierInvoices(), listSupplierPayments(),
+    listProducts(), listSales(), listSuppliers(), listSupplierInvoices(), listSupplierPayments(), listPurchases(),
   ]);
-  const [products, sales, suppliers, supInvoices, supPayments] = stats;
-  const sizeEst = JSON.stringify({ products, sales, suppliers, supInvoices, supPayments }).length;
+  const [products, sales, suppliers, supInvoices, supPayments, purchases] = stats;
+  const sizeEst = JSON.stringify({ products, sales, suppliers, supInvoices, supPayments, purchases }).length;
   const sizeLabel = sizeEst > 1024 * 1024 ? `${(sizeEst / 1048576).toFixed(1)} م.ب` : `${Math.max(1, Math.round(sizeEst / 1024))} ك.ب`;
 
   host.appendChild(
@@ -188,9 +216,10 @@ async function boot(host) {
         ),
         el(
           'div',
-          { style: 'display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:15px;text-align:center' },
+          { style: 'display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:15px;text-align:center' },
           statBox(String(supInvoices.length), 'فاتورة شراء'),
-          statBox(String(supPayments.length), 'دفعة')
+          statBox(String(supPayments.length), 'دفعة'),
+          statBox(String(purchases.length), 'تجديد كمية')
         ),
         el('p.tiny.muted', { style: 'margin-bottom:13px', text: `حجم البيانات الحالي تقريباً: ${sizeLabel}. كل شيء محفوظ محلياً في هذا الجهاز فقط.` }),
         el(
@@ -198,12 +227,25 @@ async function boot(host) {
           {},
           el('button.btn.btn--primary', { type: 'button', onClick: (e) => doExport(e.currentTarget) }, fromHTML(icon('download')), el('span', { text: 'تصدير نسخة احتياطية' })),
           el('button.btn.btn--soft', { type: 'button', onClick: (e) => doImport(e.currentTarget) }, fromHTML(icon('upload')), el('span', { text: 'استعادة من ملف' }))
-        )
+        ),
+        el('p.tiny.muted', {
+          style: 'margin-top:11px',
+          text: 'الملف يشمل المنتجات والمقاسات والألوان والكميات وفواتير البيع والمرتجعات والموردين وفواتير الشراء والدفعات وعمليات تجديد الكمية وبيانات المتجر والإعدادات.',
+        })
       )
     ])
   );
 
   /* --- 4 · about ------------------------------------------------------- */
+  const wa = (number, label) =>
+    el(
+      'a.about-wa',
+      { href: `https://wa.me/${number}`, target: '_blank', rel: 'noopener' },
+      fromHTML(icon('phone')),
+      el('span.about-wa__num', { text: `+${number}` }),
+      el('span.tiny.muted', { text: label })
+    );
+
   host.appendChild(
     group('about', 'حول التطبيق', 'info', [
       el(
@@ -213,22 +255,19 @@ async function boot(host) {
         el('div', { text: 'نظام إدارة متجر الملابس — مخزون، بيع، عملاء وتقارير.' }),
         el('div', { style: 'margin-top:6px', html: `البيانات محفوظة محلياً (IndexedDB · إصدار ${DB_VERSION}) ولا تغادر جهازك.` }),
         el('div', { style: 'margin-top:6px', text: `التخزين: ${DB_NAME}` })
+      ),
+      el(
+        'div.about-credits',
+        {},
+        el('div.about-credits__row', {},
+          fromHTML(icon('pencil')),
+          el('b', { text: 'برمجة وتطوير: أحمد المصري & إبراهيم خلف' })
+        ),
+        el('div.about-credits__label.tiny.muted', { text: 'للتواصل والدعم:' }),
+        el('div.about-credits__row.about-credits__row--wa', {}, wa('972598191325', 'أحمد المصري'), wa('972568802803', 'إبراهيم خلف')),
+        el('div.about-credits__brand', { text: 'managed by :  Ahmad & Ibrheam' })
       )
     ])
-  );
-
-  /* --- 5 · danger zone -------------------------------------------------- */
-  host.appendChild(
-    el(
-      'section.settings-group.danger-zone',
-      {},
-      el('div.settings-group__head', {}, fromHTML(icon('alert')), el('h3', { text: 'منطقة الخطر' })),
-      el(
-        'div.settings-body',
-        {},
-        el('button.btn.btn--danger.btn--block', { type: 'button', onClick: doClear }, fromHTML(icon('trash')), el('span', { text: 'مسح كل البيانات' }))
-      )
-    )
   );
 
   host.appendChild(el('div', { style: 'height:8px' }));
@@ -246,12 +285,11 @@ async function boot(host) {
       return;
     }
     await saveSettings({
-    storeName: s.storeName.trim(),
-    ownerName: s.ownerName.trim(),
-    storeTagline: s.storeTagline.trim(),
+      storeName: s.storeName.trim(),
+      ownerName: s.ownerName.trim(),
       phone: s.phone.trim(),
-      address: s.address.trim(),
-      currency: s.currency.trim() || 'ILS',
+      openingBalance: Math.max(0, Number(s.openingBalance) || 0),
+      editPin: String(s.editPin || '0000').replace(/\D/g, '') || '0000',
       lowStockThreshold: Number(s.lowStockThreshold) || 0,
       receiptFooter: s.receiptFooter.trim(),
       receiptShowLogo: s.receiptShowLogo,
@@ -345,29 +383,10 @@ async function boot(host) {
     }
   }
 
-  async function doClear() {
-    const yes1 = await confirmDialog({
-      title: 'مسح كل البيانات؟',
-      message: 'سيُحذف كل المنتجات والفواتير والعملاء نهائياً من هذا الجهاز. صدّر نسخة احتياطية أولاً إن أردت.',
-      confirmLabel: 'متابعة',
-      danger: true,
-    });
-    if (!yes1) return;
-
-    const yes2 = await confirmDialog({
-      title: 'تأكيد نهائي',
-      message: 'هل أنت متأكد تماماً؟ لا يمكن استرجاع البيانات بعد الحذف.',
-      confirmLabel: 'نعم، احذف كل شيء',
-      danger: true,
-    });
-    if (!yes2) return;
-
-    await clearAll();
-    await saveSettings({ seeded: true });
-    toast('تم مسح البيانات', 'ok');
-    navigate('dashboard');
-    setTimeout(() => location.reload(), 500);
-  }
+  /* The whole "danger zone" group is gone — the spec asks for it to be
+     deleted outright, with nothing in its place. Wiping a shop is no longer
+     one careless tap away from the settings screen; the backup file is the
+     only thing that moves data, and it only ever moves it somewhere safe. */
 }
 
 /* ------------------------------------------------------------------ *

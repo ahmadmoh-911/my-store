@@ -72,6 +72,20 @@
 }
 @media (min-width: 760px) { .stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
+/* Inventory: three compact tiles in one row even on a phone — the numbers are
+   small enough that a 2-up grid would just push the list below the fold. */
+.stat-grid--inv {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin-bottom: 13px;
+}
+.stat--slim { padding: 12px 12px 13px; }
+.stat--slim .stat__top { margin-bottom: 6px; }
+.stat--slim .stat__label { font-size: var(--fs-2xs); }
+.stat--slim .stat__value { font-size: var(--fs-h2); }
+.stat__icon--sm { width: 28px; height: 28px; border-radius: var(--r-sm); }
+.stat__icon--sm svg { width: 15px; height: 15px; }
+
 .quick-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -258,6 +272,51 @@
 .pos__searchrow > .pill-btn { flex: 0 0 auto; padding: 0 13px; }
 .pill-btn.is-on { background: var(--primary-tint); border-color: var(--primary); color: var(--primary); }
 
+/* Inventory toolbar, second line: the two actions that create stock. */
+.products-toolbar__actions {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+/* Registration is the Inventory barcode button's job, so it reads bigger than
+   the secondary chips beside it. */
+.pill-btn--lg {
+  height: 50px;
+  padding: 0 19px;
+  font-size: var(--fs-body);
+  font-weight: 700;
+}
+.pill-btn--lg svg { width: 19px; height: 19px; }
+.pill-btn--add {
+  flex: 1 1 auto;
+  justify-content: center;
+  background: linear-gradient(160deg, var(--primary) 0%, var(--primary-deep) 100%);
+  border-color: transparent;
+  color: var(--ink-on-primary);
+  box-shadow: 0 6px 18px -10px rgba(0, 0, 0, 0.8);
+}
+.pill-btn--add:hover { filter: brightness(1.06); }
+
+.pill-btn--sm {
+  height: 32px;
+  padding: 0 10px;
+  font-size: var(--fs-2xs);
+  border-radius: var(--r-sm);
+  border-width: 1px;
+  background: var(--surface-hi);
+  gap: 5px;
+}
+.pill-btn--sm svg { width: 14px; height: 14px; }
+.pill-btn--restock { color: var(--emerald); border-color: var(--emerald-tint); background: var(--emerald-tint); }
+.pill-btn--restock:hover { border-color: var(--emerald); }
+.pill-btn--edit { color: var(--ink-2); }
+.pill-btn--edit:hover { border-color: var(--line-strong); color: var(--ink); }
+.pill-btn--ok { color: var(--success); border-color: var(--emerald-tint); background: var(--emerald-tint); }
+.pill-btn--ok:hover { border-color: var(--success); }
+.pill-btn--add2 { color: var(--primary); border-color: var(--primary-tint); background: var(--primary-tint); }
+.pill-btn--add2:hover { border-color: var(--primary); }
+
 .result-line {
   display: flex;
   align-items: center;
@@ -360,21 +419,22 @@
 }
 .pcard__price { font-weight: 700; font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
 .pcard__price small { font-size: 10.5px; color: var(--ink-3); font-weight: 600; margin-inline-start: 3px; }
-.pcard__add {
-  margin-inline-start: auto;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  background: var(--primary);
-  color: var(--ink-on-primary);
-  box-shadow: 0 5px 12px -6px rgba(0, 0, 0, 0.7);
-  transition: transform 240ms var(--ease-spring), background var(--t-fast);
+
+/* one honest line about stock, above the price — no more guessing from the
+   size pills alone */
+.pcard__stockline {
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
 }
-.pcard__add svg { width: 17px; height: 17px; }
-.pcard__add:active { transform: scale(0.8); }
-.pcard__add:hover { background: var(--primary-deep); }
+
+.pcard__acts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+.pcard__acts .pill-btn { justify-content: center; width: 100%; }
 
 /* list view â€” mirrors the Stitch inventory rows */
 .plist { display: grid; gap: 10px; }
@@ -412,6 +472,7 @@
 .prow__end { display: grid; justify-items: end; gap: 7px; flex-shrink: 0; }
 .prow__price { font-weight: 700; font-size: var(--fs-h3); font-variant-numeric: tabular-nums; }
 .prow__price small { font-size: 11px; color: var(--ink-3); margin-inline-start: 3px; }
+.prow__acts { display: flex; gap: 6px; }
 
 /* ==========================================================================
    3 آ· Product form
@@ -446,6 +507,59 @@
 }
 .form-section__head h3 { font-size: var(--fs-h3); flex: 1; }
 .form-section__head .badge { font-family: var(--font); }
+
+/* --- local pin gate on the sensitive sections ------------------------ *
+   Sizes, colours and quantities of a product already on the shelf sit
+   behind the pin while it is being edited. The content stays visible and
+   readable — it is just not a place a stray finger can type into.
+   -------------------------------------------------------------------- */
+.form-lock__banner { margin-bottom: 12px; }
+.form-lock__banner[hidden] { display: none; }
+.form-lock__box {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+}
+.form-lock__box > svg { width: 19px; height: 19px; color: var(--brass); flex-shrink: 0; }
+.form-lock__txt { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.form-lock__txt b { font-size: var(--fs-sm); }
+.form-lock__mark {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-sm);
+  background: var(--brass-tint);
+  color: var(--brass-deep);
+  flex-shrink: 0;
+}
+.form-lock__mark svg { width: 13px; height: 13px; }
+.form-section.is-locked > *:not(.form-section__head) {
+  opacity: 0.45;
+  filter: saturate(0.55);
+  pointer-events: none;
+  user-select: none;
+}
+
+.pin-input {
+  text-align: center;
+  letter-spacing: 0.5em;
+  font-size: var(--fs-h3);
+  font-weight: 700;
+  direction: ltr;
+}
+.pin-input.is-bad { animation: shake 380ms var(--ease); border-color: var(--danger); }
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-7px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(3px); }
+}
 
 .dropzone {
   position: relative;
@@ -676,6 +790,57 @@
 .pos-item__sizes { font-size: 10.5px; color: var(--ink-3); }
 .pos-item__foot { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
 .pos-item__price { font-weight: 700; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+
+/* The add button is the whole point of a POS card, so it is a real target —
+   38px tall, the full width of the card's footer, with the label spelled out.
+   The old 26px circular "+" rotated on hover and asked people to guess. */
+.pos-item__add {
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 38px;
+  padding: 0 13px;
+  border-radius: var(--r-md);
+  background: linear-gradient(160deg, var(--primary), var(--primary-deep));
+  color: var(--ink-on-primary);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+  transition: transform var(--t-fast), box-shadow var(--t-fast), filter var(--t-fast);
+}
+.pos-item__add svg { width: 15px; height: 15px; }
+.pos-item__add:hover { filter: brightness(1.07); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.34); }
+.pos-item__add:active { transform: scale(0.95); }
+.pos-item__add.is-off {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  box-shadow: none;
+  pointer-events: none;
+}
+@media (max-width: 420px) {
+  .pos-item__add { padding: 0 10px; font-size: var(--fs-xs); }
+}
+
+/* Read-only per-variant availability inside the product sheet. */
+.pos-item__stock { display: grid; gap: 5px; margin-top: 4px; }
+.pos-item__stockrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 11px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.pos-item__stock--ok { color: var(--success); }
+.pos-item__stock--out { color: var(--ink-3); opacity: 0.75; }
+
 .pos-item__plus {
   margin-inline-start: auto;
   width: 26px;
@@ -955,6 +1120,108 @@
 .cust-card__phone { font-size: var(--fs-xs); color: var(--ink-3); direction: ltr; text-align: start; margin-top: 1px; }
 .cust-card__meta { font-size: var(--fs-2xs); color: var(--ink-3); margin-top: 3px; }
 
+/* --- the three supplier actions, on the row itself ------------------- *
+   A supplier is something you pay, bill or check — so all three are one tap
+   away from the list instead of one tap from the list and then another from
+   inside the file.
+   -------------------------------------------------------------------- */
+.cust-card--wide { flex-direction: column; align-items: stretch; padding: 0; gap: 0; overflow: hidden; }
+.cust-card--wide .cust-card__hit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  cursor: pointer;
+}
+.cust-card--wide:hover .cust-card__hit { background: var(--surface-hi); }
+.sup-row__acts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 9px 10px 10px;
+  border-top: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--surface-dim) 60%, transparent);
+}
+.sup-row__acts .pill-btn { justify-content: center; width: 100%; height: 34px; font-size: var(--fs-2xs); padding: 0 6px; }
+@media (max-width: 380px) {
+  .sup-row__acts { grid-template-columns: 1fr; }
+}
+/* Tapping "suppliers with a balance" highlights who actually owes. */
+.cust-card.is-owed-focus { border-color: var(--danger); }
+.cust-card--wide.is-dimmed { opacity: 0.4; }
+
+/* --- the two summary figures ----------------------------------------- */
+.sup-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sup-kpi .stat__value { font-size: var(--fs-h2); }
+.sup-kpi[role='button'] { cursor: pointer; }
+.sup-kpi.is-on { border-color: var(--danger); }
+.sup-kpi.is-on .stat__label { color: var(--ink-2); }
+
+/* --- كشف حساب: one ordered timeline, running balance on every line --- */
+.stmt { display: grid; gap: 12px; }
+.stmt-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stmt-summary .sup-head__stat { border: 1px solid var(--line-soft); border-radius: var(--r-sm); padding: 8px 10px; }
+.stmt-closing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-hi);
+}
+.stmt-closing.is-owed { border-color: var(--danger-tint); background: var(--danger-tint); }
+.stmt-closing.is-credit { border-color: var(--emerald-tint); background: var(--emerald-tint); }
+.stmt-closing.is-clear { border-color: var(--emerald-tint); background: var(--emerald-tint); }
+
+.stmt-rows { display: grid; gap: 7px; max-height: 46dvh; overflow-y: auto; }
+.stmt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--card);
+}
+.stmt-row--inv { border-inline-start: 3px solid var(--primary); }
+.stmt-row--pay { border-inline-start: 3px solid var(--emerald); }
+.stmt-row__icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+.stmt-row__icon svg { width: 14px; height: 14px; }
+.stmt-row__main { flex: 1; min-width: 0; }
+.stmt-row__title { font-size: var(--fs-sm); font-weight: 700; }
+.stmt-row__sub { font-size: var(--fs-2xs); color: var(--ink-3); margin-top: 1px; }
+.stmt-row__end { text-align: end; flex-shrink: 0; }
+.stmt-row__amt { font-weight: 700; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.stmt-row__amt.is-plus { color: var(--ink); }
+.stmt-row__amt.is-minus { color: var(--success); }
+.stmt-row__bal { font-size: var(--fs-2xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+
+/* --- invoice settlement block (paid / remaining) --------------------- */
+.stmt-settle { margin-top: 10px; }
+.stmt-settle__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.stmt-cell {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-hi);
+  text-align: center;
+}
+.stmt-cell b { font-size: var(--fs-body); font-variant-numeric: tabular-nums; }
+.stmt-cell.is-owed { border-color: var(--danger-tint); background: var(--danger-tint); }
+
 /* ==========================================================================
    6 آ· Reports
    ========================================================================== */
@@ -994,6 +1261,153 @@
   margin-bottom: 16px;
 }
 @media (min-width: 780px) { .kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+/* --- store balance card --------------------------------------------- *
+   Spans the whole KPI row and has a different shape from the four range
+   cards, because it is answering a different question: not "how much did we
+   trade in this range" but "how much money is in the shop right now".
+   -------------------------------------------------------------------- */
+.kpi-grid > .balance-card { grid-column: 1 / -1; }
+
+.balance-card {
+  padding: 15px 16px 14px;
+  border: 1px solid var(--brass-tint);
+  border-radius: var(--r-lg);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--brass-tint) 55%, transparent) 0%, transparent 62%),
+    var(--card);
+  box-shadow: var(--shadow-1);
+  animation: fade-up 420ms var(--ease-out) both;
+}
+.balance-card__head { display: flex; align-items: center; gap: 12px; }
+.balance-card__label { font-size: var(--fs-xs); font-weight: 700; color: var(--ink-2); }
+.balance-card__value {
+  font-size: var(--fs-h1);
+  font-weight: 800;
+  line-height: 1.2;
+  margin: 2px 0 3px;
+  color: var(--brass-deep);
+  font-variant-numeric: tabular-nums;
+}
+.balance-card__note { font-size: var(--fs-2xs); color: var(--ink-3); }
+
+.balance-card__rows {
+  display: grid;
+  gap: 1px;
+  margin: 13px 0 11px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.balance-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 11px;
+  background: var(--surface-hi);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.balance-line__value { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+.balance-card__more {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--font);
+  font-size: var(--fs-2xs);
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+.balance-card__more svg { width: 13px; height: 13px; }
+.balance-card__more:hover { color: var(--primary); }
+
+/* The movement list behind the balance number. Collapsed by default so the KPI
+   grid still reads as four numbers at a glance. */
+.ledger-trace {
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+.ledger-trace__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--font);
+  font-size: var(--fs-2xs);
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+.ledger-trace__toggle svg { width: 13px; height: 13px; }
+.ledger-trace__toggle:hover,
+.ledger-trace__toggle.is-open { color: var(--primary); }
+
+.ledger-trace__list {
+  display: grid;
+  gap: 5px;
+  margin-top: 11px;
+  max-height: 292px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.ledger-trace__list[hidden] { display: none; }
+
+.ledger-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hi);
+  border: 1px solid var(--line-soft);
+}
+.ledger-row__icon {
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  color: var(--ink-3);
+}
+.ledger-row__icon svg { width: 14px; height: 14px; }
+.ledger-row__icon--opening { background: var(--brass-tint); color: var(--brass-deep); }
+.ledger-row__icon--restock { background: var(--danger-tint); color: var(--danger); }
+.ledger-row__icon--sale { background: var(--emerald-tint); color: var(--success); }
+
+.ledger-row__main { flex: 1 1 auto; min-width: 0; }
+.ledger-row__title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ledger-row__date { font-size: var(--fs-2xs); color: var(--ink-3); margin-top: 1px; }
+
+.ledger-row__num { flex: 0 0 auto; text-align: end; display: grid; gap: 1px; }
+.ledger-row__amt {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--success);
+}
+.ledger-row__amt.is-minus { color: var(--danger); }
+.ledger-row__bal {
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
 
 .report-cols {
   display: grid;
@@ -1099,9 +1513,54 @@
 }
 .about b { color: var(--ink-2); }
 
-.danger-zone { border-color: rgba(255, 59, 92, 0.3); }
-.danger-zone .settings-group__head { background: var(--danger-tint); }
-.danger-zone .settings-group__head svg { color: var(--danger); }
+/* --- credits & support ---------------------------------------------- *
+   Two named people and two numbers. Kept in the app itself because a shop
+   owner who has a problem at 9pm needs to reach a human, and the fastest
+   place to look for one is the last tab of Settings.
+   -------------------------------------------------------------------- */
+.about-credits {
+  border-top: 1px solid var(--line-soft);
+  padding: 15px 16px 17px;
+  display: grid;
+  gap: 11px;
+}
+.about-credits__row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.about-credits__row > svg { width: 17px; height: 17px; color: var(--primary); flex-shrink: 0; }
+.about-credits__label { margin-inline-start: 26px; margin-top: -3px; }
+.about-credits__row--wa { flex-wrap: wrap; gap: 8px; }
+.about-wa {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--emerald-tint);
+  border-radius: var(--r-md);
+  background: var(--emerald-tint);
+  color: var(--success);
+  text-decoration: none;
+  transition: border-color var(--t-fast), transform var(--t-fast);
+}
+.about-wa:hover { border-color: var(--success); }
+.about-wa:active { transform: scale(0.98); }
+.about-wa svg { width: 15px; height: 15px; }
+.about-wa__num { font-weight: 700; direction: ltr; font-size: var(--fs-sm); }
+.about-credits__brand {
+  margin-top: 3px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+  opacity: 0.75;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
 
 /* install prompt banner */
 .install-banner {
@@ -1355,11 +1814,15 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 .cb-peek__chev svg { width: 18px; height: 18px; }
 
 /* --- the open panel ---------------------------------------------- */
+/* A blur + tint behind the panel: it separates the basket from the screen
+   without a heavy solid scrim, and the panel stays the only thing in focus. */
 .cb-scrim {
   position: fixed;
   inset: 0;
   z-index: 61;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(4, 4, 6, 0.5);
+  backdrop-filter: blur(7px) saturate(120%);
+  -webkit-backdrop-filter: blur(7px) saturate(120%);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.24s;
@@ -1367,6 +1830,9 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 
 .cb-scrim.is-on { opacity: 1; pointer-events: auto; }
 
+/* The floating cart is a permanent affordance — it stands on every screen,
+   POS included. It used to be display:none on POS, which meant the cart
+   vanished the moment the invoice took over the screen. */
 .cb-panel {
   position: fixed;
   inset-inline: 0;
@@ -1380,8 +1846,10 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   border: 1px solid var(--line);
   border-bottom: none;
   border-radius: var(--r-xl) var(--r-xl) 0 0;
-  background: var(--surface-dim);
-  box-shadow: var(--shadow-3);
+  background: color-mix(in srgb, var(--surface-dim) 96%, transparent);
+  backdrop-filter: blur(18px) saturate(130%);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  box-shadow: var(--shadow-3), 0 -18px 48px rgba(0, 0, 0, 0.55);
   transform: translateY(110%);
   transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
   visibility: hidden;
@@ -1538,6 +2006,7 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 .cb-checkout { flex: 2 1 auto !important; touch-action: manipulation; }
 
 /* --- empty state -------------------------------------------------- */
+/* Reachable from every screen, including with nothing in the basket. */
 .cb-empty {
   display: grid;
   place-items: center;
@@ -1545,15 +2014,118 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   padding: 34px 20px;
   color: var(--ink-3);
 }
-
 .cb-empty svg { width: 34px; height: 34px; }
 .cb-empty p { margin: 0; font-size: var(--fs-sm); }
 
-/* On the POS screen the full cart column is already on screen, so the bar
-   would be a duplicate — it stays hidden there. */
-body.is-pos .cb-bar { display: none; }
+/* The floating cart is a permanent affordance — it stands on every screen,
+   POS included. `display:none` on POS used to make the cart vanish the moment
+   the invoice took over the screen. */
 body.is-pos.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b)); }
 
 @media (prefers-reduced-motion: reduce) {
   .cb-bar, .cb-panel, .cb-scrim { transition: none; }
+}
+
+/* ================================================================== *
+ * 9 آ· Restock — "تجديد الكمية"
+ *
+ * The sheet that turns a delivery into stock + a purchase record + a
+ * store-balance debit. Each variant is its own row with its own quantity
+ * input, because that is the whole point: a delivery of 3×M and 5×L must
+ * never end up as 8 in one of them.
+ * ================================================================== */
+.restock { display: grid; gap: 13px; }
+
+.restock__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.restock__variants { display: grid; gap: 8px; }
+
+.restock__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+  transition: border-color 160ms var(--ease);
+}
+.restock__row:focus-within { border-color: var(--line-strong); }
+.restock__rowmain { flex: 1 1 auto; min-width: 0; }
+.restock__rowname {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+.restock__rowmeta { font-size: var(--fs-2xs); color: var(--ink-3); margin-top: 2px; }
+
+.restock__newsupplier { margin-top: 10px; }
+.restock__newsupplier[hidden] { display: none; }
+
+.restock__total { margin-top: 2px; }
+
+.restock__totalline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.restock__totalline b {
+  font-size: var(--fs-h3);
+  font-weight: 800;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the picker the dashboard shortcut opens first */
+.restock__list { display: grid; gap: 7px; max-height: 52dvh; overflow-y: auto; }
+.restock__pick {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-hi);
+  color: var(--ink);
+  font-family: var(--font);
+  text-align: start;
+  cursor: pointer;
+  transition: border-color 160ms, background 160ms, transform 160ms;
+}
+.restock__pick:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.restock__pick:active { transform: scale(0.985); }
+.restock__pickimg {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.restock__pickimg--none {
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  color: var(--ink-3);
+}
+.restock__pickmain { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.restock__pickmain b { font-size: var(--fs-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  .restock__pick, .restock__row { transition: none; }
 }

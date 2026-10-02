@@ -316,6 +316,82 @@ export function promptDialog({ title, label, value = '', placeholder = '', confi
 }
 
 /* ------------------------------------------------------------------ *
+ * Local PIN gate
+ * ------------------------------------------------------------------ */
+
+/**
+ * Asks for the app's local PIN before a sensitive edit (quantities, sizes,
+ * colours). This is a speed bump against a mis-tap, NOT security: the pin
+ * lives in local settings on the same device and the owner can change it in
+ * Settings → التفضيلات.
+ *
+ * @returns {Promise<boolean>} true only when the right pin was entered
+ */
+export function pinDialog({ title = 'رمز الدخول', hint = '', pin = '' } = {}) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+
+    const input = el('input.input.pin-input', {
+      type: 'password',
+      inputmode: 'numeric',
+      autocomplete: 'off',
+      maxlength: '12',
+      placeholder: '••••',
+      dir: 'ltr',
+    });
+    const err = el('div.field__error', { hidden: true, text: 'الرمز غير صحيح' });
+
+    const body = el(
+      'div',
+      {},
+      el(
+        'div',
+        { style: 'display:flex;gap:12px;align-items:center;margin-bottom:14px' },
+        el('div.thumb.thumb--sm.thumb-ph', { html: icon('sliders') }),
+        el('div', { style: 'font-size:13.5px;color:var(--ink-2);line-height:1.6', text: hint })
+      ),
+      el('div.field', {}, el('label.field__label', { text: 'الرمز' }), input, err)
+    );
+
+    const submit = () => {
+      if (input.value === String(pin ?? '')) {
+        done(true);
+        m.close();
+        return;
+      }
+      err.hidden = false;
+      input.value = '';
+      input.focus();
+      input.classList.remove('is-bad');
+      void input.offsetWidth;
+      input.classList.add('is-bad');
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      submit();
+    });
+    input.addEventListener('input', () => (err.hidden = true));
+
+    const m = openModal({
+      title,
+      body,
+      onClose: () => done(false),
+      foot: [
+        el('button.btn', { type: 'button', text: 'إلغاء', onClick: () => m.close() }),
+        el('button.btn.btn--primary', { type: 'button', text: 'فتح', onClick: submit }),
+      ],
+    });
+    setTimeout(() => input.focus(), 60);
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * Success celebration — animated check + confetti
  * ------------------------------------------------------------------ */
 

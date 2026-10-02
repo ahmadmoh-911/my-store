@@ -4,8 +4,8 @@
  * Responsibilities:
  *   1. register the service worker (offline support)
  *   2. build the persistent chrome (topbar + sidebar footer)
- *   3. seed demo data on first run
- *   4. start the router and remove the boot splash
+ *   3. optionally seed demo data (opt-in only — a real first run stays empty)
+ *   4. start the router and remove the boot splash after its minimum time
  *   5. keep the connectivity indicator in sync
  *   6. remember the install prompt for the Settings screen
  */
@@ -64,24 +64,28 @@ function buildTopbar() {
 
   clear(bar);
 
-  // brand (mobile only — the sidebar carries it on desktop)
+  // The brand is decoration, not a link. It looked like a button, so it read
+  // as one — tapping the app's own name and being thrown to the dashboard is
+  // the kind of thing that makes people tap it twice to see if it broke.
   bar.appendChild(
     el(
-      'a.brand',
-      { href: '#/dashboard', 'aria-label': 'متجري' },
+      'span.brand',
+      { 'aria-hidden': 'true' },
       el('span.brand__mark', { html: icon('hanger') }),
       el('span.brand__name', { text: 'متجري' })
     )
   );
 
-  // contextual title (set by setTopbarContext); starts as the store name
+  // The green dot beside the store name says "this device is online and
+  // selling" — it is a status light, not a shortcut. Settings has its own
+  // button two icons away; turning the status light into a link made the
+  // indicator lie about what it was.
   bar.appendChild(
     el(
-      'button.store-pill',
-      { type: 'button', id: 'store-pill', title: 'الإعدادات', onClick: () => navigate('settings') },
+      'span.store-pill',
+      { id: 'store-pill', title: 'حالة الاتصال ونشاط المتجر' },
       el('span.store-pill__dot'),
-      el('span.store-pill__name', { id: 'topbar-context', text: '—' }),
-      fromHTML(icon('chevronDown'))
+      el('span.store-pill__name', { id: 'topbar-context', text: '—' })
     )
   );
 
@@ -251,9 +255,20 @@ function wireGlobalHandlers() {
  * Boot
  * ------------------------------------------------------------------ */
 
+/**
+ * How long the splash is guaranteed to stay on screen.
+ *
+ * A fast phone used to get a splash that flashed and vanished, which reads as
+ * a glitch rather than as an app opening. 2.5s is the floor — if the data is
+ * ready earlier the splash simply waits; if it is slower the splash comes
+ * down as soon as the screen behind it is actually painted.
+ */
+const SPLASH_MIN_MS = 2500;
+
 async function boot() {
   const splash = document.getElementById('boot');
   const shell = document.getElementById('shell');
+  const openedAt = performance.now();
 
   try {
     currentSettings = await getSettings();
@@ -262,7 +277,10 @@ async function boot() {
     currentSettings = null;
   }
 
-  // first run → demo catalogue so the app is never an empty shell
+  // A first run stays genuinely empty — no demo products, no demo sales, no
+  // opening balance. The demo catalogue is still available (the test harness
+  // and any developer build opt into it explicitly) but it is never what a
+  // shop owner sees on their own phone.
   try {
     const result = await seedIfEmpty();
     if (result.seeded) {
@@ -286,8 +304,10 @@ async function boot() {
   await startRouter();
 
   shell.hidden = false;
-  // let the first screen paint, then dissolve the splash
+  // let the first screen paint, then hold the splash for the rest of its time
   await wait(40);
+  const remaining = SPLASH_MIN_MS - (performance.now() - openedAt);
+  if (remaining > 0) await wait(remaining);
   splash.classList.add('is-done');
   setTimeout(() => splash.remove(), 420);
 

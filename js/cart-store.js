@@ -48,6 +48,28 @@ export function emit(reason = '') {
 }
 
 /* ------------------------------------------------------------------ *
+ * Cart panel visibility
+ *
+ * The floating cart panel is part of the cart's state, not of the bar that
+ * renders it: the bottom-nav cart button has to be able to open it, and the
+ * bar has to stay open while the invoice is on screen. Keeping the flag here
+ * (a module that imports nothing) lets the router set it without importing the
+ * bar, which would be an import cycle.
+ * ------------------------------------------------------------------ */
+
+let panelOpen = false;
+
+export const isPanelOpen = () => panelOpen;
+
+/** Opens/closes the floating cart panel. Works with an empty cart too. */
+export function setPanelOpen(next) {
+  const value = Boolean(next);
+  if (panelOpen === value) return;
+  panelOpen = value;
+  emit('panel');
+}
+
+/* ------------------------------------------------------------------ *
  * Totals
  * ------------------------------------------------------------------ */
 
@@ -90,6 +112,7 @@ export function clearCart() {
   // place — assigning a new object here would break every holder of it.
   discount.type = 'fixed';
   discount.value = 0;
+  panelOpen = false;
   emit();
 }
 

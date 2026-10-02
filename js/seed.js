@@ -1,9 +1,9 @@
 /**
- * First-run demo data.
+ * Optional demo data for design review and automated tests.
  *
- * Gives the app something to look at immediately (and matches the reference
- * screens). Everything it writes is ordinary IndexedDB data — "clear all data"
- * in Settings removes it for good.
+ * OFF by default: a genuine first install must be empty — 0 products, 0 sales,
+ * 0 invoices, 0 suppliers, 0 stock, 0 opening balance. Call `enableDemoSeed()`
+ * to turn it on for a test harness or a developer preview.
  *
  * Product photos are generated inline as SVG data URLs, so no binary assets
  * are needed and the images stay tiny in storage.
@@ -132,6 +132,31 @@ const SUPPLY_ITEMS = [
  * Entry point
  * ------------------------------------------------------------------ */
 
+/**
+ * Opt-in switch for the demo catalogue.
+ *
+ * A real first install must come up genuinely empty: 0 products, 0 sales,
+ * 0 invoices, 0 suppliers, 0 stock, 0 opening balance. A shop owner who
+ * installs the app and finds someone else's stock list — and then has to work
+ * out how to delete it before entering their own — has been given the wrong
+ * app.
+ *
+ * The demo data itself is not thrown away. It is genuinely useful for design
+ * review and for automated tests, so the capability stays and only its
+ * default is off: a test harness (or a developer preview build) calls
+ * `enableDemoSeed()` before boot, and every other first run gets an empty app.
+ */
+let demoSeedWanted = false;
+
+export function enableDemoSeed() {
+  demoSeedWanted = true;
+}
+
+/** True only when something explicitly asked for the demo catalogue. */
+export function demoSeedEnabled() {
+  return demoSeedWanted;
+}
+
 export async function seedIfEmpty() {
   const settings = await getSettings();
   const [products, sales] = await Promise.all([listProducts(), listSales()]);
@@ -139,6 +164,13 @@ export async function seedIfEmpty() {
   if (settings.seeded || products.length || sales.length) {
     if (!settings.seeded) await saveSettings({ seeded: true });
     return { seeded: false, products: products.length };
+  }
+
+  // A clean install. Stamp the flag either way so the emptiness check below
+  // costs one boolean from here on, and leave every counter at zero.
+  if (!demoSeedWanted) {
+    await saveSettings({ seeded: true });
+    return { seeded: false, products: 0 };
   }
 
   const now = new Date();

@@ -16,7 +16,7 @@
    the old copy until you do.
    ========================================================================== */
 
-const VERSION = 'v10';
+const VERSION = 'v11';
 const CACHE = `saher-${VERSION}`;
 
 /* Everything the app needs to boot offline. Keep in sync with /js /css /fonts. */
@@ -44,7 +44,7 @@ const PRECACHE = [
   './js/cart-store.js',
   './js/cart-bar.js',
   './js/invoice-sheet.js',
-  './js/stock-sheet.js',
+  './js/restock.js',
   './vendor/html5-qrcode.min.js',
   './js/screens/dashboard.js',
   './js/screens/products.js',

@@ -11,7 +11,7 @@ import {
   el, fromHTML, clear, moneyHTML, num, numInt, isoDate, dayKeyOf, startOfDay, endOfDay,
   addDays, fmtDate, downloadText, toCSV, wait,
 } from '../utils.js';
-import { listProducts, listSales, getSettings } from '../db.js';
+import { listProducts, listSales, listPurchases, storeLedger, getSettings } from '../db.js';
 import {
   salesBetween, revenue, orderCount, profit, avgBasket, unitsSold, discountGiven,
   bestSellers, categoryTotals, paymentBreakdown,
@@ -195,11 +195,16 @@ async function paint(screenRoot) {
   clear(body);
   body.appendChild(el('div.loading-row', {}, el('i.spinner.spinner--ink'), el('span', { text: 'جارٍ إعداد التقرير…' })));
 
-  const [allSales, products, settings] = await Promise.all([listSales(), listProducts(), getSettings()]);
+  const [allSales, products, settings, allPurchases] = await Promise.all([
+    listSales(),
+    listProducts(),
+    getSettings(),
+    listPurchases(),
+  ]);
   if (token !== paintToken || !body.isConnected) return;
 
   const sales = salesBetween(allSales, range.from, range.to);
-  snapshot = { sales, products, settings };
+  snapshot = { sales, products, settings, allSales, allPurchases };
 
   const cur = settings.currency;
   const rev = revenue(sales);
@@ -207,7 +212,14 @@ async function paint(screenRoot) {
   const orders = orderCount(sales);
   const basket = avgBasket(sales);
 
+  // The store balance is deliberately NOT one of these cards. Everything below
+  // is a measure of trading inside the selected range; the balance is a measure
+  // of money the shop actually holds, and it is derived from ALL sales and ALL
+  // restock purchases — not from the range being looked at.
+  const ledger = storeLedger(allSales, allPurchases, settings);
+
   clear(kpis);
+  kpis.appendChild(storeBalanceCard(ledger, cur));
   const cards = [
     { label: 'إجمالي المبيعات', value: rev, money: true, icon: 'trendingUp', tone: '' },
     { label: 'صافي الربح', value: pr, money: true, icon: 'coins', tone: 'emerald' },
@@ -526,7 +538,7 @@ function exportPDF() {
     toast('لا توجد بيانات لتصديرها', 'warn');
     return;
   }
-  const { sales, products, settings } = snapshot;
+  const { sales, products, settings, allSales, allPurchases } = snapshot;
   const cur = settings.currency;
   const byId = new Map(products.map((p) => [p.id, p]));
   const cats = categoryTotals(sales, products);
@@ -563,6 +575,27 @@ function exportPDF() {
       settings.logo
         ? el('img', { src: settings.logo, style: 'width:56px;height:56px;border-radius:14px;object-fit:cover' })
         : el('div', { style: 'width:56px;height:56px;border-radius:14px;background:#6b1d2f;color:#fff;display:grid;place-items:center', html: icon('hanger') })
+    )
+  );
+
+  // The printed report carries the same store-balance block as the screen, on
+  // its own line above the range figures, so a printed page can never be read
+  // as "balance = this period's sales".
+  const printLedger = storeLedger(allSales, allPurchases, settings);
+  wrap.appendChild(
+    el(
+      'div',
+      { style: 'padding:12px 14px;background:#faf7f2;border:1px solid #eae0d2;border-radius:12px;margin-bottom:18px' },
+      el('div', { style: 'font-size:11px;color:#8f787c;font-weight:700', text: 'الرصيد العام للمتجر' }),
+      el('div', { style: 'font-size:24px;font-weight:800;margin:3px 0 6px', html: moneyHTML(printLedger.balance, cur) }),
+      el(
+        'div',
+        { style: 'font-size:12px;color:#6f5c60;line-height:1.9' },
+        el('div', { text: `الرصيد الافتتاحي: ${printLedger.opening} ${cur}` }),
+        el('div', { text: `إجمالي المبيعات (كل الفواتير): ${printLedger.salesTotal} ${cur}` }),
+        el('div', { text: `مشتريات تجديد الكمية: ${printLedger.purchasesTotal} ${cur}` })
+      ),
+      el('div', { style: 'font-size:11px;color:#8f787c;margin-top:6px', text: 'مستقل عن إجمالي المبيعات في هذه الفترة' })
     )
   );
 
@@ -647,6 +680,123 @@ const kpiBox = (label, value) =>
   el('div', { style: 'padding:11px;background:#faf7f2;border:1px solid #eae0d2;border-radius:10px' },
     el('div', { style: 'font-size:11px;color:#8f787c;font-weight:600', text: label }),
     el('div', { style: 'font-size:17px;font-weight:700;margin-top:3px', html: value }));
+
+/**
+ * "الرصيد العام للمتجر" — the shop's cash position, in its own card above the
+ * range's trading figures and deliberately a different shape from them.
+ *
+ * It is derived, never a stored counter:
+ *
+ *   opening balance + every completed sale − every restock purchase
+ *
+ * A refund deletes its sale, so the credit reverses on its own; editing a sale
+ * moves the figure with it. Total Sales stays exactly what it is — a completely
+ * separate number that says nothing about the money in the till.
+ */
+function storeBalanceCard(ledger, cur) {
+  const line = (label, value, sign) =>
+    el(
+      'div.balance-line',
+      {},
+      el('span.balance-line__label', { text: label }),
+      el('span.balance-line__value', { html: `${sign}${moneyHTML(value, cur)}` })
+    );
+
+  const node = el(
+    'div.card.balance-card',
+    {},
+    el(
+      'div.balance-card__head',
+      {},
+      el('div.stat__icon.stat__icon--brass', {}, fromHTML(icon('wallet'))),
+      el(
+        'div',
+        { style: 'min-width:0' },
+        el('div.balance-card__label', { text: 'الرصيد العام للمتجر' }),
+        el('div.balance-card__value', { html: moneyHTML(ledger.balance, cur) }),
+        el('div.balance-card__note', { text: 'المال الموجود فعلياً في المتجر — مستقل تماماً عن إجمالي المبيعات' })
+      )
+    ),
+    el(
+      'div.balance-card__rows',
+      {},
+      line('الرصيد الافتتاحي', ledger.opening, ledger.opening > 0 ? '+' : ''),
+      line('إجمالي المبيعات (كل الفواتير)', ledger.salesTotal, '+'),
+      line('مشتريات تجديد الكمية', ledger.purchasesTotal, '−')
+    ),
+    ledgerTrace(ledger, cur),
+    el(
+      'button.balance-card__more',
+      { type: 'button', onClick: () => navigate('settings') },
+      fromHTML(icon('pencil')),
+      el('span', { text: 'تعديل الرصيد الافتتاحي من الإعدادات' })
+    )
+  );
+  return node;
+}
+
+/**
+ * The movement list behind the number.
+ *
+ * Every row is a record that exists in the database — an opening balance, a
+ * restock, or a completed sale. There is no invented "expenses" category,
+ * because the app has no expense records to show. A refunded sale does not
+ * appear here as a reversal: refunding deletes the sale, so its absence from
+ * the list IS the reversal, and the running balance above already reflects it.
+ */
+function ledgerTrace(ledger, cur) {
+  const host = el('div.ledger-trace');
+  const list = el('div.ledger-trace__list', { hidden: true });
+  const toggle = el(
+    'button.ledger-trace__toggle',
+    {
+      type: 'button',
+      'aria-expanded': 'false',
+      onClick: () => {
+        const open = list.hidden;
+        list.hidden = !open;
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.classList.toggle('is-open', open);
+        toggle.querySelector('span').textContent = open
+          ? `إخفاء حركة الرصيد (${ledger.entries.length})`
+          : `عرض حركة الرصيد (${ledger.entries.length})`;
+      },
+    },
+    fromHTML(icon('receipt')),
+    el('span', { text: `عرض حركة الرصيد (${ledger.entries.length})` })
+  );
+
+  // Newest first reads better for "where did my money go", and the running
+  // balance is already computed oldest-first in the ledger.
+  const newestFirst = [...ledger.entries].reverse();
+  const CAP = 40;
+  for (const e of newestFirst.slice(0, CAP)) {
+    list.appendChild(
+      el(
+        'div.ledger-row',
+        {},
+        el('div.ledger-row__icon.ledger-row__icon--' + e.type, {}, fromHTML(icon(e.type === 'opening' ? 'wallet' : e.type === 'restock' ? 'truck' : 'receipt'))),
+        el(
+          'div.ledger-row__main',
+          {},
+          el('div.ledger-row__title', { text: e.label }),
+          el('div.ledger-row__date', { text: e.date ? fmtDate(e.date) : 'قبل أول استخدام للتطبيق' })
+        ),
+        el('div.ledger-row__num', {},
+          el('span.ledger-row__amt' + (e.sign < 0 ? '.is-minus' : ''), { html: `${e.sign < 0 ? '−' : '+'}${moneyHTML(e.amount, cur)}` }),
+          el('span.ledger-row__bal', { text: `الرصيد ${num(e.balance, 0)}` })
+        )
+      )
+    );
+  }
+  if (newestFirst.length > CAP) {
+    list.appendChild(el('p.tiny.muted', { style: 'padding:9px 4px 2px', text: `و ${newestFirst.length - CAP} حركة أقدم.` }));
+  }
+
+  host.appendChild(toggle);
+  host.appendChild(list);
+  return host;
+}
 
 export function destroy() {
   destroyCharts();
