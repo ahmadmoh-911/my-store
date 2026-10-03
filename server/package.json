@@ -1,0 +1,17 @@
+{
+  "name": "storehub-license-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Licence metadata backend for Store Hub. Stores licence and identity metadata only — never store contents.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/",
+    "issue": "node scripts/issue-license.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

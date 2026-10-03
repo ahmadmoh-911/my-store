@@ -353,8 +353,12 @@ export function getLicenseRecord() {
  * the server's (for "is it really expired"). The licence phase will need both
  * and must not conflate them.
  *
+ * `linkedAccountId` stores the Google subject id that the licence is bound to.
+ * It is a placeholder until the identity phase supplies real account ids.
+ *
  * @param {{licenseId?: string, status?: string, expiresAt?: number|null,
- *          lastVerifiedAt?: string, lastServerTime?: number|null}} patch
+ *          lastVerifiedAt?: string, lastServerTime?: number|null,
+ *          linkedAccountId?: string|null}} patch
  */
 export async function saveLicenseRecord(patch = {}) {
   const existing = (await getLicenseRecord()) || {};
@@ -365,6 +369,7 @@ export async function saveLicenseRecord(patch = {}) {
     expiresAt: patch.expiresAt ?? existing.expiresAt ?? null,
     lastVerifiedAt: patch.lastVerifiedAt ?? existing.lastVerifiedAt ?? null,
     lastServerTime: patch.lastServerTime ?? existing.lastServerTime ?? null,
+    linkedAccountId: patch.linkedAccountId ?? existing.linkedAccountId ?? null,
   });
 }
 

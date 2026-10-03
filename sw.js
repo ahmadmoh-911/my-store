@@ -39,12 +39,10 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v14 — Store Hub foundation layer (version / platform / clock / identity-store).
-// PRECACHE gains those four modules, and the rule above is that BUILD must change
-// whenever PRECACHE does — this bump is what makes them reach installs that are
-// already running v13 offline. No app code imports them yet, so this changes
-// nothing about how Store Hub behaves.
-const BUILD = 'v14';
+// v15 — Store Hub licence layer (license-client). The licence backend itself
+// lives in /server and is NOT precached (it runs on a server, not in the phone).
+// PRECACHE gains the client integration; BUILD must change whenever PRECACHE does.
+const BUILD = 'v15';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -95,6 +93,7 @@ const PRECACHE = [
   './js/platform.js',
   './js/clock.js',
   './js/identity-store.js',
+  './js/license-client.js',
 
   './vendor/chart.umd.js',
 
