@@ -1772,9 +1772,27 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
   transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s;
 }
 
+/* Hidden by sliding AWAY from the navigation, upwards, never downwards.
+   `bottom` puts the bar directly above the bottom nav, so a downward hide
+   offset drags the bar across the nav's own 66px — and since `.cb-peek` is an
+   interactive button, a bar whose transition stalls at the hidden offset (a
+   throttled or backgrounded page stops advancing the timeline, and the computed
+   style stays pinned) parks an invisible button on top of the navigation and
+   kills every tap until the next reload. Travelling upwards keeps the hidden
+   position provably clear of the nav, whichever way the animation ends. */
 .cb-bar.is-hidden {
-  transform: translateY(140%);
+  transform: translateY(-140%);
   opacity: 0;
+}
+
+/* A bar that is out of sight has to be out of reach too, and `pointer-events:
+   none` on `.cb-bar` alone does NOT do it: `.cb-peek` sets its own
+   `pointer-events: auto`, which beats inheritance, so the invisible button
+   stays live. Disabling both the bar and its peek covers the whole hidden state,
+   including the frames while the slide is still running. */
+.cb-bar.is-hidden,
+.cb-bar.is-hidden .cb-peek {
+  pointer-events: none;
 }
 
 .cb-peek {

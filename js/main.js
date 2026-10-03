@@ -412,6 +412,26 @@ async function boot() {
   // missing for the opening render.
   const cartBar = mountCartBar();
 
+  // Subscribed BEFORE the router starts, on purpose. The first render is a real
+  // screen, and the cart has to hear about it: subscribed afterwards it learns
+  // of no route at all, so it believes it is on no screen, the topbar button
+  // offers "بيع جديد" while the owner is standing in the sale screen, and the
+  // first tap navigates instead of opening the basket.
+  onRoute((current) => {
+    // `current` is the router's route object ({ path, route, params, order }),
+    // not a path string — syncRoute compares against 'pos', so pass the path.
+    const path = current?.path || '';
+    // Decide whether the cart is on offer at all, and fold its panel away if not.
+    cartBar.syncRoute(path);
+    getSettings().then((s) => {
+      if (s.storeName !== currentSettings?.storeName) {
+        currentSettings = s;
+        paintStoreName();
+      }
+      refreshLowStockBadge();
+    });
+  });
+
   // render the first screen before revealing the shell so there's no flash
   renderNav('dashboard');
   await startRouter();
@@ -429,22 +449,6 @@ async function boot() {
   wireGlobalHandlers();
   wireNativeBack();
   refreshLowStockBadge();
-
-  // keep the store name in the chrome in sync when Settings saves
-  onRoute((current) => {
-    // `current` is the router's route object ({ path, route, params, order }),
-    // not a path string — syncRoute compares against 'pos', so pass the path.
-    const path = current?.path || '';
-    // Decide whether the cart is on offer at all, and fold its panel away if not.
-    cartBar.syncRoute(path);
-    getSettings().then((s) => {
-      if (s.storeName !== currentSettings?.storeName) {
-        currentSettings = s;
-        paintStoreName();
-      }
-      refreshLowStockBadge();
-    });
-  });
 
   console.info('[saher] ready');
 }

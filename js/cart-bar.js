@@ -308,6 +308,15 @@ function paintBar() {
   bar.classList.toggle('is-hidden', !shown);
   document.body.classList.toggle('has-cartbar', shown);
 
+  // Hidden means unreachable, and that has to hold even when the hide/show
+  // transition does not run to completion — an interrupted or throttled
+  // transition leaves the bar translated down across the bottom nav, still
+  // laid out and still clickable, which silently kills the navigation until
+  // the next reload. `inert` is not animated, so it applies the moment the
+  // class flips: the subtree leaves hit-testing and the tab order at once.
+  if (shown) bar.removeAttribute('inert');
+  else bar.setAttribute('inert', '');
+
   const showPanel = onPos && isPanelOpen();
   panel.classList.toggle('is-open', showPanel);
   scrim.classList.toggle('is-on', showPanel);
