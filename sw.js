@@ -39,11 +39,12 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v13 — Store Hub rebrand. PRECACHE is unchanged, but the icons keep their file
-// names while their bytes are new, so an already-installed v12 would keep
-// serving the retired hanger artwork from its cache. Bumping BUILD is what makes
-// the new images reach existing installs.
-const BUILD = 'v13';
+// v14 — Store Hub foundation layer (version / platform / clock / identity-store).
+// PRECACHE gains those four modules, and the rule above is that BUILD must change
+// whenever PRECACHE does — this bump is what makes them reach installs that are
+// already running v13 offline. No app code imports them yet, so this changes
+// nothing about how Store Hub behaves.
+const BUILD = 'v14';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -86,6 +87,14 @@ const PRECACHE = [
   './js/screens/suppliers.js',
   './js/screens/reports.js',
   './js/screens/settings.js',
+
+  // Foundation layer. Not imported by anything yet, so nothing here can change
+  // how the app behaves — but precached, because the phase that wires them in
+  // must find them available offline on a phone with no signal.
+  './js/version.js',
+  './js/platform.js',
+  './js/clock.js',
+  './js/identity-store.js',
 
   './vendor/chart.umd.js',
 

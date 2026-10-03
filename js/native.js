@@ -16,6 +16,32 @@ export function isNative() {
   return !!(c && typeof c.isNativePlatform === 'function' && c.isNativePlatform());
 }
 
+/**
+ * The native platform id reported by the shell — 'android', 'ios', and so on.
+ *
+ * This lives beside isNative() rather than being re-derived by the caller,
+ * because `bridge()` is the only sanctioned way to reach the Capacitor proxy:
+ * reading window.Capacitor from a second module would be a duplicate
+ * abstraction, and it would also spread the "plugins are optional" rule across
+ * files. The web build has no bridge at all, so this returns null there — which
+ * is the answer a caller needs in order to fall back to the browser.
+ *
+ * @returns {string|null} the platform id, or null outside a native shell.
+ */
+export function nativePlatform() {
+  const c = bridge();
+  if (!c || typeof c.isNativePlatform !== 'function' || !c.isNativePlatform()) return null;
+  if (typeof c.getPlatform === 'function') {
+    try {
+      const p = c.getPlatform();
+      if (typeof p === 'string' && p) return p;
+    } catch {
+      /* a bridge that cannot answer is treated as unknown, not as an error */
+    }
+  }
+  return null;
+}
+
 function plugin(name) {
   const c = bridge();
   return c && c.Plugins ? c.Plugins[name] : null;
