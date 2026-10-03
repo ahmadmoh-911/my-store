@@ -23,32 +23,111 @@ import { isNative, onNativeBack, minimizeApp } from './native.js';
  * Service worker
  * ------------------------------------------------------------------ */
 
+/**
+ * How long to wait after a load before asking the browser to look for a new
+ * worker. Long enough not to compete with boot, short enough that the owner is
+ * not left on yesterday's build.
+ */
+const SW_UPDATE_AFTER_MS = 3000;
+
+/**
+ * Set once the page has reloaded itself into a new worker, so the reload can
+ * never become a loop. sessionStorage rather than a module variable because the
+ * whole point is to survive the reload it is guarding.
+ */
+const SW_RELOAD_FLAG = 'saher:sw-reloaded';
+
 function registerServiceWorker() {
   // Inside the Android shell every file is already bundled in the APK, so the
   // cache layer is redundant and a second one only risks serving stale assets.
   if (isNative()) return;
   if (!('serviceWorker' in navigator)) return;
 
+  let reloading = false;
+
+  /**
+   * Reload once, and only once, after a new worker takes control.
+   *
+   * Without this the tab keeps running the document it loaded while the worker
+   * underneath it has already swapped caches — the exact "half old, half new"
+   * state that leaves a phone on an old version with no visible cause.
+   */
+  const reloadIntoNewWorker = () => {
+    if (reloading) return;
+    reloading = true;
+    let alreadyReloaded = false;
+    try {
+      alreadyReloaded = sessionStorage.getItem(SW_RELOAD_FLAG) === '1';
+      sessionStorage.setItem(SW_RELOAD_FLAG, '1');
+    } catch {
+      /* private mode: the flag is a safety net, not a requirement */
+    }
+    if (alreadyReloaded) return;
+    // Reloading on the first claim of a very first visit would throw away the
+    // page the owner is looking at for nothing.
+    if (!navigator.serviceWorker.controller) return;
+    location.reload();
+  };
+
+  navigator.serviceWorker.addEventListener('controllerchange', reloadIntoNewWorker);
+
   window.addEventListener('load', async () => {
     try {
-      const reg = await navigator.serviceWorker.register('sw.js');
+      const reg = await navigator.serviceWorker.register('sw.js', {
+        // Without this the worker script itself may be served from the HTTP
+        // cache, so a redeploy can go unnoticed at the root of the chain.
+        updateViaCache: 'none',
+      });
+
+      /**
+       * Asks the browser to re-fetch sw.js and diff it against the running one.
+       *
+       * The browser decides whether anything changed — we never force anything.
+       * Throttled, because this runs on a phone battery and a rejected network
+       * simply means the old build stays, which is the correct offline answer.
+       */
+      let lastCheck = 0;
+      const checkForUpdate = () => {
+        const now = Date.now();
+        if (now - lastCheck < 60 * 60 * 1000) return;
+        lastCheck = now;
+        reg.update().catch(() => null);
+      };
+
+      // A worker that finished installing while this page was already open.
       reg.addEventListener('updatefound', () => {
         const sw = reg.installing;
         if (!sw) return;
-        sw.addEventListener('statechange', async () => {
-          // a new build finished installing while the app is open
+        sw.addEventListener('statechange', () => {
           if (sw.state === 'installed' && navigator.serviceWorker.controller) {
-            toast('يتوفر تحديث للتطبيق — أعد التشغيل لتطبيقه', 'info', 5200);
+            // Take it now rather than on the next cold start: the shop should
+            // not need to reopen the app to get the build it already downloaded.
+            sw.postMessage('SKIP_WAITING');
           }
         });
+      });
+
+      // A worker that installed while the app was closed: adopt it immediately.
+      if (reg.waiting && navigator.serviceWorker.controller) {
+        reg.waiting.postMessage('SKIP_WAITING');
+      }
+
+      checkForUpdate();
+      setTimeout(checkForUpdate, SW_UPDATE_AFTER_MS);
+
+      // Coming back to a long-lived tab is the other moment an update is
+      // likely waiting — this is the "opened the app again" signal on mobile.
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') checkForUpdate();
+      });
+
+      // And after returning from another PWA/tab, where the clock is different.
+      window.addEventListener('pageshow', (e) => {
+        if (e.persisted) checkForUpdate();
       });
     } catch (err) {
       console.warn('[sw] registration failed', err);
     }
-  });
-
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    // swallow the extra reload some browsers fire on first SW claim
   });
 }
 
