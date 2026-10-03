@@ -251,7 +251,7 @@ async function boot(host) {
       el(
         'div.about',
         {},
-        el('b', { text: 'متجري' }),
+        el('b', { text: 'Store Hub' }),
         el('div', { text: 'نظام إدارة متجر الملابس — مخزون، بيع، عملاء وتقارير.' }),
         el('div', { style: 'margin-top:6px', html: `البيانات محفوظة محلياً (IndexedDB · إصدار ${DB_VERSION}) ولا تغادر جهازك.` }),
         el('div', { style: 'margin-top:6px', text: `التخزين: ${DB_NAME}` })

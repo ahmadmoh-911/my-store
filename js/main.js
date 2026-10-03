@@ -9,7 +9,7 @@
  *   5. keep the connectivity indicator in sync
  *   6. remember the install prompt for the Settings screen
  */
-import { icon } from './icons.js';
+import { icon, logoImg } from './icons.js';
 import { el, fromHTML, clear, escapeHTML, wait } from './utils.js';
 import { getSettings, listProducts } from './db.js';
 import { lowStockProducts } from './analytics.js';
@@ -150,8 +150,8 @@ function buildTopbar() {
     el(
       'span.brand',
       { 'aria-hidden': 'true' },
-      el('span.brand__mark', { html: icon('hanger') }),
-      el('span.brand__name', { text: 'متجري' })
+      el('span.brand__mark', {}, fromHTML(logoImg())),
+      el('span.brand__name', { text: 'Store Hub' })
     )
   );
 

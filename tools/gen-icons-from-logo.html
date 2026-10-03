@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Store Hub — derive app icons from logo.jpeg</title>
+<style>
+  body { font: 15px/1.6 ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 28px; color: #1c1c1f; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p  { max-width: 68ch; margin: 0 0 14px; }
+  code { background: #f2f0ec; padding: 1px 5px; border-radius: 4px; }
+  .warn { border-left: 3px solid #6b1d2f; background: #faf7f2; padding: 10px 14px; max-width: 68ch; }
+  #out { display: flex; flex-wrap: wrap; gap: 22px; margin: 22px 0; padding: 18px; background: #faf7f2; border-radius: 12px; }
+  figure { margin: 0; text-align: center; }
+  figure img { display: block; background: #fff; border: 1px solid #ddd; border-radius: 8px; }
+  figcaption { font-size: 12px; margin-top: 6px; color: #555; }
+  button { font: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid #6b1d2f; background: #6b1d2f; color: #fff; cursor: pointer; }
+  button[disabled] { opacity: .5; cursor: default; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 16px; font-size: 13px; }
+  dt { color: #666; } dd { margin: 0; }
+</style>
+</head>
+<body>
+
+<h1>Store Hub — derive the app icons from <code>logo.jpeg</code></h1>
+
+<p>
+  Every PNG in <code>icons/</code> is produced here. This is a crop and a
+  resample of the original image — no redrawing, no recolouring, no new SVG, no
+  AI. The logo's colours, shapes and proportions are whatever
+  <code>logo.jpeg</code> already contains.
+</p>
+
+<p class="warn">
+  <strong>Why a browser?</strong> node has no JPEG decoder on this machine, so
+  the decode and the high-quality resample are done by the browser's own
+  (libjpeg + canvas). Serve the repository over HTTP, open this page, press the
+  button, and drop the nine files into <code>icons/</code>.
+  <strong>Bump <code>BUILD</code> in <code>sw.js</code> afterwards</strong> — the
+  file names do not change, so without a new build id existing installs keep
+  serving the previous artwork from cache.
+</p>
+
+<p>
+  Run: <code>node tools/serve.mjs</code> (or any static server) from the repo
+  root, then open <code>/tools/gen-icons-from-logo.html</code>.
+</p>
+
+<div id="out"></div>
+<p><button id="go">Render and download all nine</button></p>
+
+<dl id="facts"></dl>
+
+<script>
+'use strict';
+
+/**
+ * Sizes and margins. `margin` is the empty plate left around the mark, as a
+ * fraction of the mark's own size:
+ *
+ *   purpose:any    0.12 — a rounded-corner mask may clip the outer 12%
+ *   maskable       0.20 — content must sit inside the central 80% safe circle
+ *   favicon 16/32  0.02 — at these sizes legibility beats margin
+ *
+ * The crop is always a square centred on the mark and always taken from inside
+ * the original canvas, so no output pixel is invented — the padding is the
+ * logo's own flat plate, resampled.
+ */
+const TARGETS = [
+  ['icon-192.png',             192, 0.12],
+  ['icon-512.png',             512, 0.12],
+  ['icon-96.png',               96, 0.12],
+  ['icon-48.png',               48, 0.12],
+  ['icon-maskable-192.png',    192, 0.20],
+  ['icon-maskable-512.png',    512, 0.20],
+  ['apple-touch-icon.png',     180, 0.20], // iOS masks with a squircle; same safe zone
+  ['favicon-32.png',            32, 0.02],
+  ['favicon-16.png',            16, 0.02],
+];
+
+/** Luminance above which a pixel counts as part of the mark. */
+const MARK_LUMA = 40;
+
+const src = document.createElement('canvas');
+const sg = src.getContext('2d', { willReadFrequently: true });
+
+function facts(el, rows) {
+  el.replaceChildren(...rows.flatMap(([k, v]) => {
+    const dt = document.createElement('dt'); dt.textContent = k;
+    const dd = document.createElement('dd'); dd.textContent = v;
+    return [dt, dd];
+  }));
+}
+
+/**
+ * Bounding box of the mark, found by thresholding luminance — no hard-coded
+ * coordinates, so the pipeline survives a replacement logo of a different size.
+ */
+function findMark(data, W, H) {
+  const luma = (i) => 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (luma((y * W + x) * 4) > MARK_LUMA) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) throw new Error('no mark found — is logo.jpeg the right file?');
+  return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+/** Largest centred square for a given margin, clamped to stay inside the image. */
+function cropFor(mark, W, H, margin) {
+  const side = Math.ceil(Math.max(mark.w, mark.h) * (1 + 2 * margin));
+  if (side > Math.min(W, H)) throw new Error('crop does not fit: ' + side);
+  const cx = (mark.x0 + mark.x1) / 2;
+  const cy = (mark.y0 + mark.y1) / 2;
+  const sx = Math.max(0, Math.min(W - side, Math.round(cx - side / 2)));
+  const sy = Math.max(0, Math.min(H - side, Math.round(cy - side / 2)));
+  return { sx, sy, side };
+}
+
+function render(size, crop) {
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = 'high';
+  // square source region -> square destination: uniform scale, never a stretch
+  g.drawImage(src, crop.sx, crop.sy, crop.side, crop.side, 0, 0, size, size);
+  return c;
+}
+
+async function main() {
+  const go = document.getElementById('go');
+  go.disabled = true;
+  go.textContent = 'Reading logo.jpeg…';
+
+  const bmp = await createImageBitmap(await (await fetch('../logo.jpeg')).blob());
+  src.width = bmp.width; src.height = bmp.height;
+  sg.drawImage(bmp, 0, 0);
+
+  const mark = findMark(sg.getImageData(0, 0, bmp.width, bmp.height).data, bmp.width, bmp.height);
+
+  const out = document.getElementById('out');
+  out.replaceChildren();
+
+  for (const [name, size, margin] of TARGETS) {
+    const crop = cropFor(mark, bmp.width, bmp.height, margin);
+    const url = render(size, crop).toDataURL('image/png');
+
+    const fig = document.createElement('figure');
+    const img = document.createElement('img');
+    img.src = url;
+    img.width = Math.min(size, 128);
+    img.height = Math.min(size, 128);
+    const cap = document.createElement('figcaption');
+    cap.textContent = name + ' · ' + size + '×' + size;
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    a.append(img, cap);
+    fig.append(a);
+    out.append(fig);
+
+    const bytes = Math.round(url.length * 3 / 4);
+    setTimeout(() => {
+      const keep = document.createElement('a');
+      keep.href = url; keep.download = name;
+      keep.click();
+    }, 250 * TARGETS.findIndex((t) => t[0] === name));
+  }
+
+  facts(document.getElementById('facts'), [
+    ['source', 'logo.jpeg  ' + bmp.width + '×' + bmp.height +
+      ' (' + (bmp.width === bmp.height ? 'square' : (bmp.width > bmp.height ? 'landscape' : 'portrait')) + ')'],
+    ['mark box', mark.w + '×' + mark.h + '  →  ' +
+      (100 * mark.w / bmp.width).toFixed(1) + '% × ' + (100 * mark.h / bmp.height).toFixed(1) + '% of the canvas'],
+    ['mark aspect', (mark.w / mark.h).toFixed(4) + '  (1.0000 would be perfectly square)'],
+    ['method', 'square crop centred on the mark, entirely inside the original, then uniform resample'],
+    ['files', TARGETS.length + '  —  into icons/  —  then bump BUILD in sw.js'],
+  ]);
+
+  go.textContent = 'Done — ' + TARGETS.length + ' files downloaded';
+}
+
+document.getElementById('go').addEventListener('click', () => {
+  main().catch((e) => {
+    document.getElementById('go').disabled = false;
+    document.getElementById('go').textContent = 'Failed: ' + e.message;
+  });
+});
+</script>
+</body>
+</html>

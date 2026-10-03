@@ -6,7 +6,7 @@
     name="viewport"
     content="width=device-width, initial-scale=1, viewport-fit=cover"
   />
-  <title>متجري — إدارة متجر الملابس</title>
+  <title>Store Hub — إدارة متجر الملابس</title>
   <meta name="description" content="نظام إدارة متجر الملابس: المخزون، نقطة البيع، العملاء والتقارير — يعمل بالكامل بدون إنترنت." />
 
   <!-- PWA / installability -->
@@ -19,8 +19,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="متجري" />
-  <meta name="application-name" content="متجري" />
+  <meta name="apple-mobile-web-app-title" content="Store Hub" />
+  <meta name="application-name" content="Store Hub" />
   <meta name="format-detection" content="telephone=no" />
   <meta name="msapplication-TileColor" content="#6B1D2F" />
 
@@ -39,15 +39,12 @@
   <!-- Boot splash: shown until the first screen is rendered, then removed.
        Uses the same shimmer as the skeleton loaders so there is never a white flash. -->
   <div class="boot" id="boot" role="status" aria-live="polite">
+    <!-- The official Store Hub logo, verbatim. The generated square crop keeps the
+         mark square and centred, so it fills this box with no stretching. -->
     <div class="boot__mark">
-      <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true">
-        <path d="M12 8.5V6.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none" />
-        <path d="M12 8.5 3.6 15.2a.7.7 0 0 0 .6 1.15h15.6a.7.7 0 0 0 .6-1.15L12 8.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
-        <path d="M4.2 17.4h15.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-        <path d="M12 8.4a2.1 2.1 0 1 1 2.1-2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-      </svg>
+      <img src="icons/icon-192.png" alt="" aria-hidden="true" width="84" height="84" decoding="async" />
     </div>
-    <div class="boot__name">متجري</div>
+    <div class="boot__name">Store Hub</div>
     <div class="boot__bar"><i></i></div>
     <div class="boot__credit">managed by :&nbsp; Ahmad &amp; Ibrheam</div>
   </div>

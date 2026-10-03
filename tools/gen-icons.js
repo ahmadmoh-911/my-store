@@ -1,3 +1,19 @@
+/* ==========================================================================
+ * SUPERSEDED — DO NOT RUN. This script no longer owns the app icons.
+ *
+ * It hand-drew the old clothes-hanger mark in code. The official brand is now
+ * logo.jpeg, and every PNG in icons/ is a crop-and-resample of that file — see
+ * tools/gen-icons-from-logo.html. Running this file would silently replace the
+ * official logo with the retired hanger artwork, in all nine sizes, with no
+ * error and no diff you would notice at a glance.
+ *
+ * The drawing code below is kept only as a record of where the old icons came
+ * from. If the icons ever need to be regenerated, use the logo pipeline; only
+ * reach for this file if you are deliberately restoring the hanger mark, and
+ * then reset the topbar, sidebar and splash to match.
+ * ==========================================================================
+ */
+
 /**
  * Generates every PNG the PWA needs (manifest icons + apple touch icon).
  *
@@ -5,7 +21,7 @@
  * writes PNGs directly: RGBA buffer -> box-filtered supersampling for clean
  * anti-aliasing -> zlib deflate -> standard PNG chunks.
  *
- * Run:  node tools/gen-icons.js
+ * Run:  node tools/gen-icons.js        <-- see the banner above. Do not.
  */
 const fs = require('fs');
 const path = require('path');

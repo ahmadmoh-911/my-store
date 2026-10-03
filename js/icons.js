@@ -149,3 +149,20 @@ export function icon(name, size, cls = '') {
 }
 
 export const ICON_NAMES = Object.keys(P);
+
+/**
+ * The official Store Hub logo, as an <img> markup string.
+ *
+ * The brand mark is a real image, not an icon — so it is not drawn as inline
+ * SVG and not tinted with `currentColor`. It points at a generated square crop
+ * of logo.jpeg (see tools/gen-icons-from-logo.html): a crop and a resample of
+ * the original pixels, never a redraw. The crop is square, so the CSS boxes
+ * that hold it (.boot__mark, .brand__mark) fill it exactly without distortion.
+ *
+ * `logoSrc` is the one place the brand asset path is written down.
+ */
+export const logoSrc = 'icons/icon-192.png';
+
+export function logoImg(alt = '') {
+  return `<img src="${logoSrc}" alt="${alt}" decoding="async">`;
+}

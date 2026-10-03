@@ -39,7 +39,11 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-const BUILD = 'v12';
+// v13 — Store Hub rebrand. PRECACHE is unchanged, but the icons keep their file
+// names while their bytes are new, so an already-installed v12 would keep
+// serving the retired hanger artwork from its cache. Bumping BUILD is what makes
+// the new images reach existing installs.
+const BUILD = 'v13';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 

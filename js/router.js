@@ -8,7 +8,7 @@
  * Routes are hash-based (`#/products`) so the app works from any static host
  * or sub-folder without server rewrites.
  */
-import { icon } from './icons.js';
+import { icon, logoImg } from './icons.js';
 import { clear, escapeHTML } from './utils.js';
 
 import dashboardScreen from './screens/dashboard.js';
@@ -143,8 +143,8 @@ export function renderNav(activeId) {
   clear(sidebar);
   sidebar.innerHTML =
     `<a class="sidebar__brand" href="#/dashboard">` +
-    `<span class="brand__mark">${icon('hanger')}</span>` +
-    `<span class="sidebar__brand-text"><b>متجري</b><span>إدارة متجر الملابس</span></span>` +
+    `<span class="brand__mark">${logoImg()}</span>` +
+    `<span class="sidebar__brand-text"><b>Store Hub</b><span>إدارة متجر الملابس</span></span>` +
     `</a>` +
     `<div class="sidebar__label">القائمة</div>`;
   SIDE_NAV.forEach((item) => sidebar.appendChild(buildNavItem(item, activeId)));

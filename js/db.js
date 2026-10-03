@@ -1081,7 +1081,7 @@ export async function exportAll() {
 /** What a file has to carry before we are willing to touch the live database. */
 export function validateBackup(data) {
   if (!data || typeof data !== 'object') return 'ملف النسخة الاحتياطية غير صالح';
-  if (data.app !== 'saher') return 'هذا الملف ليس نسخة احتياطية من متجري';
+  if (data.app !== 'saher') return 'هذا الملف ليس نسخة احتياطية من Store Hub';
   if (!Array.isArray(data.products)) return 'النسخة الاحتياطية لا تحتوي على قائمة المنتجات';
   if (!Array.isArray(data.sales)) return 'النسخة الاحتياطية لا تحتوي على قائمة الفواتير';
   // A settings block is what carries the store balance's opening figure; a file

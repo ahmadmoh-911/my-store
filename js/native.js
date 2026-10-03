@@ -46,7 +46,7 @@ export async function printPage() {
     return;
   }
 
-  const label = (document.getElementById('topbar-context')?.textContent || 'متجري').trim();
+  const label = (document.getElementById('topbar-context')?.textContent || 'Store Hub').trim();
   await p.print({
     html: '<!doctype html>\n' + document.documentElement.outerHTML,
     jobName: label,
