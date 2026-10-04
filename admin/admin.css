@@ -1,0 +1,569 @@
+/**
+ * Admin Portal stylesheet.
+ *
+ * Separate file, and separate bundle, from the Store Hub customer app: this
+ * portal is meant to be hosted on its own origin (see ADMIN_PORTAL.md), so it
+ * carries its own styles rather than sharing the shop's. Nothing here is
+ * imported by the customer app.
+ *
+ * The palette is the existing Store Hub dark theme so the two do not look like
+ * different products to an operator who has both open.
+ */
+
+:root {
+  --bg: #0f172a;
+  --bg-elevated: #1e293b;
+  --fg: #f1f5f9;
+  --fg-muted: #94a3b8;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --border: #334155;
+  --card: #1e293b;
+  --input-bg: #0f172a;
+  --radius: 12px;
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --transition: 150ms ease;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+/* ---- layout ---------------------------------------------------------- */
+
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  border-inline-start: 1px solid var(--border);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  padding: 0 16px 24px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.sidebar-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-title svg {
+  width: 28px;
+  height: 28px;
+  color: var(--accent);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  border: 1px solid transparent;
+  background: none;
+  width: 100%;
+  text-align: start;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.nav-item:hover,
+.nav-item[aria-current='page'] {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--accent);
+  border-color: rgba(59, 130, 246, 0.2);
+}
+
+.nav-item svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 0.8125rem;
+  color: var(--fg-muted);
+  word-break: break-all;
+}
+
+.main {
+  flex: 1;
+  padding: 32px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.page-title {
+  font-size: 1.75rem;
+  font-weight: 700;
+}
+
+.page-subtitle {
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* ---- cards ----------------------------------------------------------- */
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 24px;
+}
+
+.card-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+/* ---- forms ----------------------------------------------------------- */
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 1rem;
+  transition: var(--transition);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.field-hint {
+  color: var(--fg-muted);
+  font-size: 0.8125rem;
+  margin-top: 6px;
+}
+
+/* ---- buttons --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.9375rem;
+  border: none;
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.btn-group {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- table ----------------------------------------------------------- */
+
+.table-container {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 12px 16px;
+  text-align: start;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-weight: 600;
+  color: var(--fg-muted);
+  font-size: 0.8125rem;
+  letter-spacing: 0.5px;
+}
+
+tbody tr:hover td {
+  background: rgba(59, 130, 246, 0.03);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.mono {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.875rem;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+/* ---- badges ---------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge-active {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.badge-expired,
+.badge-revoked {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+
+.badge-suspended {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+/* ---- detail list ----------------------------------------------------- */
+
+.detail-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px 24px;
+}
+
+.detail-item dt {
+  color: var(--fg-muted);
+  font-size: 0.8125rem;
+  margin-bottom: 4px;
+}
+
+.detail-item dd {
+  word-break: break-word;
+}
+
+/* ---- states ---------------------------------------------------------- */
+
+.empty,
+.centered-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--fg-muted);
+}
+
+.centered-state {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+.centered-state h1 {
+  color: var(--fg);
+  font-size: 1.5rem;
+}
+
+.centered-state .card {
+  max-width: 520px;
+  text-align: start;
+}
+
+.state-icon {
+  width: 64px;
+  height: 64px;
+  opacity: 0.6;
+}
+
+.state-icon.danger {
+  color: var(--danger);
+}
+
+/* ---- modal ----------------------------------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  gap: 16px;
+}
+
+.modal-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.modal-close:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+
+/* ---- one-time secret ------------------------------------------------- */
+
+/*
+ * The activation code is shown exactly once. The styling makes that unmissable
+ * rather than leaving it to a caption nobody reads: it is the only way to
+ * recover it, and the server cannot produce it again.
+ */
+.code-reveal {
+  background: var(--input-bg);
+  border: 1px dashed var(--success);
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.code-reveal code {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  direction: ltr;
+  user-select: all;
+  margin-bottom: 12px;
+}
+
+.callout {
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-size: 0.875rem;
+}
+
+.callout.warning {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.callout.danger {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.callout.info {
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+/* ---- toast ----------------------------------------------------------- */
+
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  inset-inline-start: 24px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toast {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  min-width: 280px;
+  max-width: 400px;
+  box-shadow: var(--shadow);
+  font-size: 0.9375rem;
+}
+
+.toast.success {
+  border-inline-start: 4px solid var(--success);
+}
+
+.toast.error {
+  border-inline-start: 4px solid var(--danger);
+}
+
+.toast.info {
+  border-inline-start: 4px solid var(--accent);
+}
+
+/* ---- responsive ------------------------------------------------------ */
+
+@media (max-width: 1024px) {
+  .sidebar {
+    position: fixed;
+    inset-inline-start: -260px;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    transition: inset-inline-start 200ms ease;
+  }
+
+  .sidebar.open {
+    inset-inline-start: 0;
+  }
+
+  .menu-toggle {
+    display: inline-flex !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .main {
+    padding: 16px;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .btn-group .btn {
+    flex: 1;
+  }
+}

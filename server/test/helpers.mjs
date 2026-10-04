@@ -18,6 +18,7 @@ import { createRequestHandler } from '../src/http.js';
 import { generateLicenseCode } from '../src/codes.js';
 import { openAuthDatabase } from '../src/auth-repository.js';
 import { createAuthService } from '../src/auth-service.js';
+import { createAdminLicenseService } from '../src/admin-service.js';
 
 /**
  * A pepper long enough to satisfy the production length check, fixed so that a
@@ -108,25 +109,54 @@ export function createTestService(options = {}) {
  * codes, and the envelope are all part of the contract, and a test that calls
  * the service directly would pass even if the route layer were broken.
  *
- * @param {{licenseService?: object, authService?: object, service?: object, config: object}} app
+ * @param {{
+ *   licenseService?: object,
+ *   authService?: object,
+ *   adminService?: object,
+ *   service?: object,
+ *   config: object,
+ * }} app
  * @param {string} path
  * @param {{method?: string, body?: unknown, headers?: Record<string,string>}} [options]
  * @returns {Promise<{status: number, body: any, headers: Record<string, any>}>}
  */
 export async function request(app, path, options = {}) {
-  // Backward compatibility: accept `service` as alias for `licenseService`
+  // Backward compatibility: accept `service` as alias for `licenseService`.
   const licenseService = app.licenseService ?? app.service;
-  // Minimal authService stub for tests that don't provide one
+
+  // A stub for the auth plane, so a licence-only test does not have to build an
+  // OAuth round trip it does not care about. `getMe` returning null is the
+  // correct answer for "this request has no session", which is what keeps every
+  // admin route refusing by default.
   const authService = app.authService ?? {
-    startAuth() { throw new Error('auth not configured'); },
-    completeAuth() { throw new Error('auth not configured'); },
-    getMe() { return null; },
-    logout() { return false; },
-    revokeAllSessions() { return 0; },
+    startAuth() {
+      throw new Error('auth not configured');
+    },
+    completeAuth() {
+      throw new Error('auth not configured');
+    },
+    getMe() {
+      return null;
+    },
+    logout() {
+      return false;
+    },
+    revokeAllSessions() {
+      return 0;
+    },
     serverNow: () => Date.now(),
-    getPublicConfig() { return {}; },
+    getPublicConfig() {
+      return {};
+    },
   };
-  const handle = createRequestHandler({ licenseService, authService, config: app.config });
+
+  const handle = createRequestHandler({
+    licenseService,
+    authService,
+    adminService: app.adminService,
+    config: app.config,
+  });
+
   const method = options.method ?? 'POST';
   const payload = options.body === undefined ? '' : JSON.stringify(options.body);
 
@@ -160,6 +190,13 @@ export async function request(app, path, options = {}) {
   let text = '';
   const res = {
     headersSent: false,
+    // Real Node merges `setHeader` calls with whatever `writeHead` is given, and
+    // the auth routes set the session cookie that way. Without this the cookie
+    // paths would throw instead of being asserted on.
+    setHeader(name, value) {
+      headers[String(name).toLowerCase()] = value;
+      return res;
+    },
     writeHead(code, headerMap = {}) {
       status = code;
       Object.assign(headers, headerMap);
@@ -215,6 +252,75 @@ export async function createTestAuthService(app) {
     config: app.config,
     close() {
       authDb.repo.close();
+    },
+  };
+}
+
+/**
+ * Builds the whole backend — licence, auth and admin — on in-memory databases,
+ * with one clock the test drives and a set of Google accounts it can sign in as.
+ *
+ * Sessions are minted through the repository rather than by driving a real
+ * Google round trip, because the thing under test is *who is allowed to do
+ * what*, not whether the OAuth dance works. The one test that does need the real
+ * flow (the admin callback) mocks `fetch` and goes through `completeAuth` for
+ * real.
+ *
+ * @param {{authorizedSubs?: string[], portalUrl?: string, startAt?: number}} [options]
+ */
+export async function createTestAdminApp(options = {}) {
+  const base = createTestService({
+    env: {
+      STOREHUB_ADMIN_SUB: (options.authorizedSubs ?? []).join(','),
+      ...(options.portalUrl ? { STOREHUB_ADMIN_PORTAL_URL: options.portalUrl } : {}),
+    },
+  });
+
+  const auth = await createTestAuthService(base);
+  const adminService = createAdminLicenseService({
+    licenseService: base.service,
+    repository: base.repository,
+    clock: () => base.now(),
+    log: () => {},
+  });
+
+  return {
+    ...base,
+    authService: auth.authService,
+    authRepository: auth.authRepository,
+    authDb: auth.authDb,
+    adminService,
+
+    /**
+     * Signs a Google account in and returns the cookie value the admin guard
+     * will read. `sub` is the identity everything is decided on.
+     *
+     * @param {string} googleSub
+     * @param {{email?: string}} [meta]
+     */
+    signIn(googleSub, meta = {}) {
+      auth.authRepository.upsertAccount({
+        googleSub,
+        email: meta.email ?? `${googleSub}@example.test`,
+        displayName: meta.displayName ?? null,
+        avatarUrl: null,
+      });
+      const { sessionToken } = auth.authRepository.createSession(
+        googleSub,
+        base.config.session.ttlMs,
+        'node-test',
+      );
+      return sessionToken;
+    },
+
+    /** @param {string} [token] @returns {Record<string,string>} request headers carrying the session */
+    cookieHeaders(token) {
+      return { cookie: `storehub_session=${token}` };
+    },
+
+    close() {
+      auth.close();
+      base.close();
     },
   };
 }

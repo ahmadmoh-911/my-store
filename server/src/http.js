@@ -15,8 +15,19 @@ import { createServer as createHttpServer } from 'node:http';
 
 import { ERROR_CODES, LicenseError, isLicenseError, errorBody } from './errors.js';
 import { pickClientFields, rejectedClientFields, effectiveStatus } from './model.js';
+import { createAdminAuthorizer } from './admin-authorization.js';
 
-/** Extracts session token from Cookie header. */
+/**
+ * Reads the session cookie.
+ *
+ * Module-private on purpose. The admin guard needs it too, but importing it back
+ * from here would make this file and ./admin-authorization.js depend on each
+ * other; instead the guard receives it as a parameter. Cookie parsing is the
+ * transport layer's job and stays here.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {string|null}
+ */
 function extractSessionToken(req) {
   const cookie = req.headers.cookie || '';
   const match = cookie.match(/(?:^|;\s*)storehub_session=([^;]+)/);
@@ -46,23 +57,122 @@ function clearSessionCookie(res, config) {
 const MAX_BODY_BYTES = 16 * 1024;
 
 /**
- * Routes, and nothing else. Each entry names the method it accepts so the 405
- * can be produced without a routing library.
+ * Routes, and nothing else.
  *
- * Auth routes support GET for OAuth redirects and session reads.
+ * A list rather than a path→route map, because two admin paths legitimately
+ * answer two methods (`/api/admin/licenses` is both a listing and a creation).
+ * As an object literal the second entry would silently overwrite the first and
+ * the listing would 405 — a failure with no error message anywhere. A list
+ * cannot express that mistake.
+ *
+ * `admin: true` marks a route as behind the authorisation guard. That flag is
+ * the reason a new admin endpoint cannot be added unprotected by accident: the
+ * guard runs before the body is even read, and a test asserts every `/api/admin`
+ * route carries it.
+ *
+ * Patterns use `:name` for one path segment; anything else must match literally.
  */
-const ROUTES = Object.freeze({
-  // Licence endpoints (POST only)
-  '/api/license/activate': { method: 'POST', handler: 'activate' },
-  '/api/license/verify': { method: 'POST', handler: 'verify' },
-  '/api/license/bind': { method: 'POST', handler: 'bind' },
+const ROUTES = Object.freeze([
+  // ---- customer licence plane ------------------------------------------
+  { method: 'POST', path: '/api/license/activate', handler: 'activate' },
+  { method: 'POST', path: '/api/license/verify', handler: 'verify' },
+  { method: 'POST', path: '/api/license/bind', handler: 'bind' },
 
-  // Auth endpoints
-  '/api/auth/google/start': { method: 'GET', handler: 'authStart' },
-  '/api/auth/google/callback': { method: 'GET', handler: 'authCallback' },
-  '/api/auth/me': { method: 'GET', handler: 'authMe' },
-  '/api/auth/logout': { method: 'POST', handler: 'authLogout' },
-});
+  // ---- customer authentication plane ------------------------------------
+  { method: 'GET', path: '/api/auth/google/start', handler: 'authStart' },
+  { method: 'GET', path: '/api/auth/google/callback', handler: 'authCallback' },
+  { method: 'GET', path: '/api/auth/me', handler: 'authMe' },
+  { method: 'POST', path: '/api/auth/logout', handler: 'authLogout' },
+
+  // ---- admin sign-in ----------------------------------------------------
+  // Separate from the customer flow so the two entry points stay separately
+  // auditable, and so the callback can refuse a non-admin *and* destroy the
+  // session it just created.
+  { method: 'GET', path: '/api/admin/auth/start', handler: 'adminAuthStart' },
+  { method: 'GET', path: '/api/admin/auth/callback', handler: 'adminAuthCallback' },
+
+  // ---- admin licence plane (every route guarded) -----------------------
+  { method: 'GET', path: '/api/admin/me', handler: 'adminMe', admin: true },
+  { method: 'GET', path: '/api/admin/licenses', handler: 'adminListLicenses', admin: true },
+  { method: 'POST', path: '/api/admin/licenses', handler: 'adminCreateLicense', admin: true },
+  { method: 'GET', path: '/api/admin/licenses/:id', handler: 'adminGetLicense', admin: true },
+  { method: 'POST', path: '/api/admin/licenses/:id/suspend', handler: 'adminSuspendLicense', admin: true },
+  { method: 'POST', path: '/api/admin/licenses/:id/reactivate', handler: 'adminReactivateLicense', admin: true },
+  { method: 'POST', path: '/api/admin/licenses/:id/revoke', handler: 'adminRevokeLicense', admin: true },
+  { method: 'POST', path: '/api/admin/licenses/:id/note', handler: 'adminSetLicenseNote', admin: true },
+  { method: 'GET', path: '/api/admin/licenses/:id/events', handler: 'adminListLicenseEvents', admin: true },
+]);
+
+/**
+ * Compiles a `/a/:id/b` pattern into a matcher.
+ *
+ * Segments are matched individually rather than by pasting the pattern into a
+ * RegExp, so no pattern character can be read as regex syntax and a segment
+ * parameter can never swallow a slash.
+ *
+ * @param {string} pattern
+ * @returns {{pattern: string, regex: RegExp, params: string[]}}
+ */
+function compileRoute(pattern) {
+  const params = [];
+  const source = pattern
+    .split('/')
+    .map((segment) => {
+      if (segment.startsWith(':')) {
+        params.push(segment.slice(1));
+        return '([^/]+)';
+      }
+      return segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('/');
+  return { pattern, regex: new RegExp(`^${source}$`), params };
+}
+
+const COMPILED_ROUTES = Object.freeze(
+  ROUTES.map((route) => ({ ...route, ...compileRoute(route.path) })),
+);
+
+/**
+ * Finds the route for a request.
+ *
+ * Method-aware on purpose. Matching the path alone and reporting 405 afterwards
+ * looks equivalent, but it is wrong the moment one path serves two methods:
+ * `GET /api/admin/licenses` and `POST /api/admin/licenses` would both resolve to
+ * whichever was declared first, and the other would 405 forever.
+ *
+ * @param {string} path
+ * @param {string} method
+ * @returns {{route: object, params: Record<string, string>}|null}
+ */
+function matchRoute(path, method) {
+  for (const route of COMPILED_ROUTES) {
+    if (route.method !== method) continue;
+    const match = route.regex.exec(path);
+    if (!match) continue;
+    const params = {};
+    route.params.forEach((name, index) => {
+      // decodeURIComponent so an id containing an encoded character arrives as
+      // the value the operator typed rather than as its percent-encoding.
+      try {
+        params[name] = decodeURIComponent(match[index + 1]);
+      } catch {
+        params[name] = match[index + 1];
+      }
+    });
+    return { route, params };
+  }
+  return null;
+}
+
+/**
+ * The methods a known path accepts, for a truthful 405.
+ *
+ * @param {string} path
+ * @returns {string[]} empty when the path is not a route at all
+ */
+function allowedMethodsFor(path) {
+  return COMPILED_ROUTES.filter((route) => route.regex.test(path)).map((route) => route.method);
+}
 
 /**
  * A fixed-window counter, in memory, keyed by IP.
@@ -174,6 +284,40 @@ function parseJson(text) {
 }
 
 /**
+ * @param {URLSearchParams} query
+ * @param {string} name
+ * @returns {string|null} the trimmed value, or null when absent or empty
+ */
+function readQueryParam(query, name) {
+  const raw = query.get(name);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+/**
+ * Reads a bounded integer from the query string.
+ *
+ * Anything unparseable falls back to the default rather than becoming NaN and
+ * poisoning a SQL parameter — `?limit=abc` should mean "the default", not "the
+ * server is confused".
+ *
+ * @param {URLSearchParams} query
+ * @param {string} name
+ * @param {number} fallback
+ * @param {number} min
+ * @param {number} max
+ * @returns {number}
+ */
+function readBoundedInt(query, name, fallback, min, max) {
+  const raw = readQueryParam(query, name);
+  if (raw === null) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+/**
  * The client's IP, for rate limiting.
  *
  * `x-forwarded-for` is only honoured when the operator says the server is
@@ -212,6 +356,7 @@ export function createRequestHandler(deps) {
   // Backward compatibility: accept `service` as alias for `licenseService`
   const licenseService = deps.licenseService ?? deps.service;
   const authService = deps.authService;
+  const adminService = deps.adminService;
   const config = deps.config;
   const log = deps.log || (() => {});
   const limiter = createRateLimiter({
@@ -220,6 +365,14 @@ export function createRequestHandler(deps) {
     maxVerify: config.rateLimit.maxVerify,
   });
   const trustProxy = config.trustProxy === true;
+
+  // One guard, built once, reused by every admin route.
+  const adminAuthorizer = createAdminAuthorizer({
+    authService,
+    config,
+    extractSessionToken,
+    log,
+  });
 
   /**
    * Writes the one response shape every endpoint uses.
@@ -267,6 +420,8 @@ export function createRequestHandler(deps) {
     const path = (req.url || '').split('?')[0];
     const query = new URL(req.url || '', `http://${req.headers.host}`).searchParams;
 
+    const now = licenseService.serverNow();
+
     if (req.method === 'OPTIONS') {
       // Preflight. Answered from the same allowlist as the real request so the
       // preflight cannot be more permissive than the call.
@@ -275,32 +430,28 @@ export function createRequestHandler(deps) {
       return;
     }
 
-    const now = licenseService.serverNow();
-    const route = ROUTES[path];
+    const matched = matchRoute(path, req.method);
+    if (!matched) {
+      // The path may still be real and simply not served for this method. Saying
+      // so — with the methods that are served — is what lets a caller correct
+      // itself without reading the source.
+      const otherMethods = allowedMethodsFor(path);
+      if (otherMethods.length > 0) {
+        const allowed = [...new Set([...otherMethods, 'OPTIONS'])];
+        send(
+          res,
+          405,
+          { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), allowed },
+          { ...cors, allow: allowed.join(', ') },
+        );
+        return;
+      }
 
-    if (!route) {
-      send(
-        res,
-        404,
-        { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path },
-        cors,
-      );
+      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
       return;
     }
 
-    // Check method
-    if (req.method !== route.method) {
-      send(
-        res,
-        405,
-        {
-          ...errorBody(ERROR_CODES.INVALID_REQUEST, now),
-          allowed: [route.method, 'OPTIONS'],
-        },
-        { ...cors, allow: `${route.method}, OPTIONS` },
-      );
-      return;
-    }
+    const { route, params } = matched;
 
     // Rate limiting for licence endpoints only
     if (path.startsWith('/api/license/')) {
@@ -317,6 +468,23 @@ export function createRequestHandler(deps) {
           { ...cors, 'retry-after': String(rate.retryAfterSeconds) },
         );
         return;
+      }
+    }
+
+    // Admin authorisation. Deliberately placed above the body read and above
+    // every branch below: an unauthorised caller must not reach a mutation, and
+    // must not even get to send a payload that would be validated. Throwing here
+    // means the guard cannot be forgotten inside a handler.
+    let admin = null;
+    if (route.admin) {
+      try {
+        admin = adminAuthorizer.requireAdmin(req);
+      } catch (err) {
+        if (isLicenseError(err)) {
+          send(res, err.status, errorBody(err.code, now), cors);
+          return;
+        }
+        throw err;
       }
     }
 
@@ -409,6 +577,149 @@ export function createRequestHandler(deps) {
         return;
       }
 
+      // Admin endpoints.
+      if (route.handler === 'adminAuthStart') {
+        const { authUrl, state } = authService.startAuth({ intent: 'admin' });
+        send(res, 200, { ok: true, authUrl, state, serverTime: now }, cors);
+        return;
+      }
+
+      if (route.handler === 'adminAuthCallback') {
+        const code = query.get('code');
+        const state = query.get('state');
+        const denied = query.get('error');
+
+        if (denied) {
+          log('admin oauth denied', { error: denied });
+          send(res, 400, errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Sign-in was cancelled.'), cors);
+          return;
+        }
+        if (!code || !state) {
+          send(res, 400, errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Missing code or state'), cors);
+          return;
+        }
+
+        const result = await authService.completeAuth({
+          code,
+          state,
+          userAgent: req.headers['user-agent'] || null,
+        });
+
+        // A flow that started at the customer sign-in must not be finishable
+        // here, or the two entry points would not be distinguishable in a log.
+        if (result.intent !== 'admin') {
+          authService.logout(result.sessionToken);
+          send(res, 400, errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Wrong sign-in entry point.'), cors);
+          return;
+        }
+
+        // Authentication succeeded; authorisation is a separate question. This
+        // is where a customer account that signed in at the admin portal is
+        // turned away — and the session created a moment earlier is destroyed
+        // first, so a refused admin attempt leaves no usable cookie behind.
+        if (!adminAuthorizer.resolveAdmin(result.sessionToken)) {
+          authService.logout(result.sessionToken);
+          log('admin sign-in refused', { googleSub: result.account.googleSub });
+          send(res, 403, errorBody(ERROR_CODES.ADMIN_REQUIRED, now), cors);
+          return;
+        }
+
+        setSessionCookie(res, result.sessionToken, config);
+
+        // Only ever to the configured portal URL, never to anything from the
+        // request — that is what keeps this from being an open redirect.
+        const portalUrl = config.admin.portalUrl;
+        if (portalUrl) {
+          res.writeHead(302, { location: portalUrl, 'cache-control': 'no-store', ...cors });
+          res.end();
+          return;
+        }
+        send(res, 200, {
+          ok: true,
+          account: result.account,
+          serverTime: now,
+        }, cors);
+        return;
+      }
+
+      if (route.handler === 'adminMe') {
+        // `admin` is the already-authorised caller; nothing about a customer
+        // store is reachable from here, only the operator's own identity.
+        send(res, 200, {
+          ok: true,
+          admin: { googleSub: admin.googleSub, email: admin.email },
+          configured: config.admin.authorizedSubs.length,
+          serverTime: now,
+        }, cors);
+        return;
+      }
+
+      // ---- guarded admin licence operations ------------------------------
+      // Past this point the caller is an authorised admin (the guard threw
+      // otherwise), so these read and write licence metadata only.
+      if (route.handler.startsWith('admin')) {
+        if (!adminService) {
+          throw new LicenseError(ERROR_CODES.INTERNAL_ERROR, {
+            detail: 'adminService is not wired',
+          });
+        }
+
+        let body = {};
+        if (req.method === 'POST') {
+          body = parseJson(await readBody(req));
+        }
+
+        let result;
+        switch (route.handler) {
+          case 'adminListLicenses':
+            result = adminService.listLicenses({
+              status: readQueryParam(query, 'status'),
+              limit: readBoundedInt(query, 'limit', 50, 1, 200),
+              offset: readBoundedInt(query, 'offset', 0, 0, 1_000_000),
+            });
+            break;
+          case 'adminCreateLicense':
+            result = adminService.createLicense({
+              expiresInDays: body.expiresInDays,
+              note: body.note,
+            });
+            break;
+          case 'adminGetLicense':
+            result = adminService.getLicense(params.id);
+            break;
+          case 'adminSuspendLicense':
+            result = adminService.suspend(params.id, body.reason);
+            break;
+          case 'adminReactivateLicense':
+            result = adminService.reactivate(params.id, body.reason);
+            break;
+          case 'adminRevokeLicense':
+            result = adminService.revoke(params.id, body.reason);
+            break;
+          case 'adminSetLicenseNote':
+            if (!Object.prototype.hasOwnProperty.call(body, 'note')) {
+              throw new LicenseError(ERROR_CODES.INVALID_REQUEST, {
+                detail: 'note is required (send null to clear it)',
+              });
+            }
+            result = adminService.setNote(params.id, body.note);
+            break;
+          case 'adminListLicenseEvents':
+            result = adminService.listEvents(params.id, {
+              limit: readBoundedInt(query, 'limit', 100, 1, 500),
+              offset: readBoundedInt(query, 'offset', 0, 0, 1_000_000),
+            });
+            break;
+          default:
+            throw new LicenseError(ERROR_CODES.INTERNAL_ERROR, {
+              detail: `unknown admin handler ${route.handler}`,
+            });
+        }
+
+        send(res, 200, { ok: true, ...result, serverTime: now }, cors);
+        return;
+      }
+
       // Should not reach here
       send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
     } catch (err) {
@@ -426,11 +737,11 @@ export function createRequestHandler(deps) {
 /**
  * Starts the HTTP server.
  *
- * @param {{service: object, config: object, log?: Function}} deps
+ * @param {{licenseService: object, authService: object, adminService: object, config: object, log?: Function}} deps
  * @returns {{server: import('node:http').Server, listen: (port?: number, host?: string) => Promise<{port: number, host: string}>}}
  */
-export function createLicenseServer({ service, config, log = () => {} }) {
-  const handle = createRequestHandler({ service, config, log });
+export function createLicenseServer({ licenseService, authService, adminService, config, log = () => {} }) {
+  const handle = createRequestHandler({ licenseService, authService, adminService, config, log });
   const server = createHttpServer((req, res) => {
     // A handler that throws asynchronously would otherwise take the process
     // down; handle() already converts errors to responses.

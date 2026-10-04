@@ -160,7 +160,7 @@ export function createAuthService({ authRepository, config, clock, log = () => {
 
   // In-memory PKCE verifier store (keyed by state). In production with multiple
   // instances this would need a shared store, but for now it's fine.
-  /** @type {Map<string, {verifier: string, expiresAt: number}>} */
+  /** @type {Map<string, {verifier: string, expiresAt: number, intent: string}>} */
   const pkceStore = new Map();
 
   /**
@@ -170,11 +170,20 @@ export function createAuthService({ authRepository, config, clock, log = () => {
    * redirects the user to this URL. The state and PKCE verifier are stored
    * server-side temporarily to complete the flow on callback.
    *
-   * @returns {{authUrl: string, state: string}}
+   * `intent` is recorded alongside the verifier and comes back from
+   * `completeAuth`, so a sign-in that *started* at one entry point cannot be
+   * *finished* at another. The admin portal uses it to keep its flow apart from
+   * the customer flow: without it, an admin callback would accept a state
+   * minted by the customer route, and the two entry points would stop being
+   * separately auditable.
+   *
+   * @param {{intent?: 'customer'|'admin'}} [options]
+   * @returns {{authUrl: string, state: string, intent: string}}
    */
-  function startAuth() {
+  function startAuth(options = {}) {
     validateGoogleConfig(config);
 
+    const intent = options.intent === 'admin' ? 'admin' : 'customer';
     const { verifier, challenge } = generatePkce();
     const state = randomBytes(16).toString('base64url');
     const authUrl = buildGoogleAuthUrl({
@@ -185,7 +194,7 @@ export function createAuthService({ authRepository, config, clock, log = () => {
     });
 
     // Store PKCE verifier with a short TTL (10 minutes)
-    pkceStore.set(state, { verifier, expiresAt: now() + 10 * 60 * 1000 });
+    pkceStore.set(state, { verifier, expiresAt: now() + 10 * 60 * 1000, intent });
 
     // Cleanup old entries periodically
     if (pkceStore.size > 1000) {
@@ -195,16 +204,21 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       }
     }
 
-    log('oauth start', { state });
-    return { authUrl, state };
+    log('oauth start', { intent });
+    return { authUrl, state, intent };
   }
 
   /**
    * Completes the OAuth flow: exchanges code for tokens, fetches user info,
    * upserts the account, creates a session, and returns the session token.
    *
+   * `intent` is echoed back from the pending state so the caller that started
+   * the flow can assert it is finishing the flow it owns. The session is created
+   * before that assertion is made, so a caller that rejects the intent must also
+   * discard the session — see the admin callback in ./http.js.
+   *
    * @param {{code: string, state: string, userAgent?: string}} params
-   * @returns {{sessionToken: string, account: object, serverTime: number}}
+   * @returns {{sessionToken: string, account: object, intent: string, serverTime: number}}
    */
   async function completeAuth({ code, state, userAgent }) {
     validateGoogleConfig(config);
@@ -251,10 +265,11 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       userAgent,
     );
 
-    log('oauth complete', { googleSub: account.googleSub, email: account.email });
+    log('oauth complete', { intent: pkceEntry.intent, googleSub: account.googleSub });
 
     return {
       sessionToken,
+      intent: pkceEntry.intent,
       account: {
         googleSub: account.googleSub,
         email: account.email,

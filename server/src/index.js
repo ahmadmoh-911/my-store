@@ -1,7 +1,7 @@
 /**
- * `node server/src/index.js` — runs the licence + auth backend.
+ * `node server/src/index.js` — runs the licence, auth and admin backend.
  *
- * Wiring only: read config, open the database, build the services, listen. No
+ * Wiring only: read config, open the databases, build the services, listen. No
  * logic belongs here; anything that does is logic that the tests cannot reach
  * without starting a socket.
  */
@@ -14,13 +14,27 @@ import { openLicenseDatabase } from './sqlite.js';
 import { openAuthDatabase } from './auth-repository.js';
 import { createLicenseService } from './service.js';
 import { createAuthService } from './auth-service.js';
+import { createAdminLicenseService } from './admin-service.js';
+import { describeAdminConfiguration } from './admin-authorization.js';
 import { createLicenseServer } from './http.js';
 
 /**
+ * Builds every service the backend exposes.
+ *
+ * Async only because opening the identity database loads the SQLite driver; the
+ * licence adapter opens synchronously.
+ *
  * @param {{env?: NodeJS.ProcessEnv}} [options]
- * @returns {{config: object, licenseService: object, authService: object, log: Function, close: () => void}}
+ * @returns {Promise<{
+ *   config: object,
+ *   licenseService: object,
+ *   authService: object,
+ *   adminService: object,
+ *   log: (message: string, detail?: unknown) => void,
+ *   close: () => void,
+ * }>}
  */
-export function buildApplication(options = {}) {
+export async function buildApplication(options = {}) {
   const config = loadConfig(options.env ?? process.env);
 
   /** @param {string} message @param {unknown} [detail] */
@@ -38,18 +52,46 @@ export function buildApplication(options = {}) {
   // first open rather than surfacing ENOENT as a confusing startup error.
   if (!config.useMemoryDb) mkdirSync(dirname(config.databaseFile), { recursive: true });
 
-  const licenseRepository = openLicenseDatabase(config.databaseFile, {
-    clock: () => Date.now(),
-  });
-  const licenseService = createLicenseService({ repository: licenseRepository.repo, config, clock: () => Date.now(), log });
+  const clock = () => Date.now();
 
-  const authRepo = openAuthDatabase(config.databaseFile, {
-    clock: () => Date.now(),
+  // Note the two different shapes, which is easy to get backwards:
+  // `openLicenseDatabase` hands back the repository itself, while
+  // `openAuthDatabase` hands back `{ db, repo }`. Reading `.repo` off the
+  // licence one yields undefined and the first request fails with a confusing
+  // "cannot read property of undefined" — so the licence repository is used
+  // directly here and a test builds this same graph to keep it honest.
+  const licenseRepository = openLicenseDatabase(config.databaseFile, { clock });
+  const licenseService = createLicenseService({ repository: licenseRepository, config, clock, log });
+
+  const authDb = await openAuthDatabase(config.databaseFile, {
+    clock,
     pepper: config.pepper,
   });
-  const authService = createAuthService({ authRepository: authRepo.repo, config, clock: () => Date.now(), log });
+  const authService = createAuthService({
+    authRepository: authDb.repo,
+    config,
+    clock,
+    log,
+  });
 
-  return { config, licenseService, authService, log, close: () => { licenseRepository.repo.close(); authRepo.repo.close(); } };
+  const adminService = createAdminLicenseService({
+    licenseService,
+    repository: licenseRepository,
+    clock,
+    log,
+  });
+
+  return {
+    config,
+    licenseService,
+    authService,
+    adminService,
+    log,
+    close() {
+      authDb.repo.close();
+      licenseRepository.close();
+    },
+  };
 }
 
 /** @param {unknown} value @returns {string} */
@@ -64,13 +106,14 @@ function safeJson(value) {
 
 /** Starts the server when invoked directly. @returns {Promise<void>} */
 async function main() {
-  const { licenseService, authService, config, log, close } = buildApplication();
+  const { licenseService, authService, adminService, config, log, close } = await buildApplication();
 
-  const { listen } = createLicenseServer({ licenseService, authService, config, log });
+  const { listen } = createLicenseServer({ licenseService, authService, adminService, config, log });
   const address = await listen();
 
   log(`storehub licence backend listening on http://${address.host}:${address.port}`);
   log(`database ${config.databaseFile}`);
+  log(describeAdminConfiguration(config.admin));
 
   if (config.env !== 'production') {
     // Named explicitly, because a dev server that looks like production is how

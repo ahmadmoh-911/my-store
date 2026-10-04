@@ -138,5 +138,99 @@ export function loadConfig(env = process.env) {
       ttlMs: Number(env.STOREHUB_SESSION_TTL_MS || 30 * 24 * 60 * 60 * 1000), // 30 days
       cookieName: env.STOREHUB_SESSION_COOKIE || 'storehub_session',
     },
+
+    /**
+     * Admin authorisation.
+     *
+     * Two separate facts, and the whole design is that they are kept separate:
+     *
+     *   authentication  — "this is a real Google account" (see `google` + the
+     *                      auth session above), and
+     *   authorisation   — "this specific account may operate the licences".
+     *
+     * `authorizedSubs` is the second fact, and it is a list of Google account
+     * `sub` values: the stable, immutable account identifier. Email is
+     * deliberately not used — an email can be renamed, recycled, or reassigned
+     * on Workspace, and an admin grant that survives that would hand the
+     * licence database to whoever inherits the mailbox.
+     *
+     * Empty by default, which means *nobody is an admin* and every admin
+     * endpoint answers 403. There is no fallback account, no development
+     * backdoor, and no password: the only way to grant admin access is to name
+     * an account in the environment. A fresh clone therefore cannot be walked
+     * into by whoever started it.
+     *
+     * Required in production, and failing loudly there is deliberate: an
+     * operator who forgets it should be told at boot, not discover it the first
+     * time a genuine admin cannot sign in.
+     */
+    admin: readAdminConfig(env, nodeEnv),
   };
+}
+
+/**
+ * Reads the admin authorisation block, refusing a production deploy that has no
+ * administrators rather than starting a portal nobody can reach.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} nodeEnv
+ * @returns {{authorizedSubs: string[], portalUrl: string}}
+ */
+function readAdminConfig(env, nodeEnv) {
+  const authorizedSubs = (env.STOREHUB_ADMIN_SUB || '')
+    .split(',')
+    .map((sub) => sub.trim())
+    .filter(Boolean);
+
+  if (nodeEnv === 'production' && authorizedSubs.length === 0) {
+    throw new Error(
+      'STOREHUB_ADMIN_SUB must list at least one Google account sub in production. ' +
+        'Find it by signing in with Google and reading the `sub` claim from the ' +
+        'ID token at https://developers.google.com/identity/protocols/oauth2/openid-connect'
+    );
+  }
+
+  return {
+    authorizedSubs,
+    /**
+     * Where the admin sign-in callback sends the browser afterwards.
+     *
+     * Optional and unset by default. When it is set it must be an absolute
+     * http(s) URL, and it is the *only* redirect target the admin callback will
+     * ever use — no target is read from the request, which is what keeps this
+     * from becoming an open redirect. Left unset, the callback answers with the
+     * same JSON envelope as the customer flow, which is the correct behaviour
+     * until a production domain has actually been chosen.
+     */
+    portalUrl: readPortalUrl(env, nodeEnv),
+  };
+}
+
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} nodeEnv
+ * @returns {string} the validated portal URL, or '' when unset
+ */
+function readPortalUrl(env, nodeEnv) {
+  const raw = (env.STOREHUB_ADMIN_PORTAL_URL || '').trim();
+  if (!raw) return '';
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      'STOREHUB_ADMIN_PORTAL_URL must be an absolute URL, e.g. https://admin.example.com',
+    );
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('STOREHUB_ADMIN_PORTAL_URL must use http or https');
+  }
+  // Plain http would carry the session cookie in the clear on the way back from
+  // Google. Loopback is exempt, because that is how the portal is developed.
+  const isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  if (parsed.protocol === 'http:' && nodeEnv === 'production' && !isLoopback) {
+    throw new Error('STOREHUB_ADMIN_PORTAL_URL must use https in production');
+  }
+  return parsed.toString();
 }

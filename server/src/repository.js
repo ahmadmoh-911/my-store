@@ -192,6 +192,40 @@ export function createLicenseRepository(db, { clock }) {
   const insertEventStmt = db.prepare(
     `INSERT INTO license_events (license_id, event, at, install_id, detail) VALUES ($licenseId, $event, $at, $installId, $detail)`,
   );
+  const eventsStmt = db.prepare(
+    `SELECT event, at, install_id, detail
+     FROM license_events WHERE license_id = $licenseId ORDER BY at DESC, id DESC LIMIT $limit OFFSET $offset`,
+  );
+  const countStmt = db.prepare('SELECT COUNT(*) AS total FROM licenses');
+  const countByEffectiveStatusStmt = db.prepare(
+    `SELECT COUNT(*) AS total FROM licenses
+     WHERE ($status = 'expired'
+            AND status = 'active'
+            AND expires_at IS NOT NULL
+            AND expires_at <= $now)
+        OR ($status <> 'expired' AND status = $status)`,
+  );
+  const listAllStmt = db.prepare(
+    `SELECT ${PUBLIC_COLUMNS} FROM licenses ORDER BY created_at DESC, id DESC LIMIT $limit OFFSET $offset`,
+  );
+  // Filtering by the *effective* status, not the stored column. A stored-status
+  // filter would put every lapsed licence in the "active" bucket, which is the
+  // one thing an operator filtering by status is asking not to happen. The
+  // `expired` predicate mirrors effectiveStatus() exactly: only a licence that is
+  // otherwise active can be expired, so a suspended one still reports suspended.
+  const listByEffectiveStatusStmt = db.prepare(
+    `SELECT ${PUBLIC_COLUMNS} FROM licenses
+     WHERE ($status = 'expired'
+            AND status = 'active'
+            AND expires_at IS NOT NULL
+            AND expires_at <= $now)
+        OR ($status <> 'expired' AND status = $status)
+     ORDER BY created_at DESC, id DESC LIMIT $limit OFFSET $offset`,
+  );
+
+  const setNoteStmt = db.prepare(
+    `UPDATE licenses SET note = $note WHERE id = $id`
+  );
 
   /** @returns {void} */
   function begin() {
@@ -392,15 +426,82 @@ export function createLicenseRepository(db, { clock }) {
     });
   }
 
+  /**
+   * Updates the internal note on a licence.
+   *
+   * @param {string} id
+   * @param {string|null} note
+   * @returns {void}
+   */
+  function setNote(id, note) {
+    setNoteStmt.run({ id, note });
+  }
+
+  /**
+   * Lists licences for the operator view, newest first.
+   *
+   * Three deliberate properties. It reads the *public* column list, so the code
+   * lookup, salt and hash cannot reach an admin screen even by accident. The
+   * `status` filter matches the status the outside world sees rather than the
+   * stored column, so "expired" selects what the UI shows as expired. And it is a
+   * port method rather than SQL written by a caller, so the day the storage moves
+   * to Postgres this list is a query swap rather than a rewrite of whoever was
+   * reaching past the repository.
+   *
+   * @param {{status?: string|null, limit?: number, offset?: number, now?: number}} [options]
+   *   `now` is the server clock, used only to evaluate the derived `expired`
+   *   status. Injected rather than read here so the predicate stays testable.
+   * @returns {{records: LicenseRecord[], total: number}}
+   */
+  function listLicenses(options = {}) {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+    const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+    const status = options.status ?? null;
+    const now = Math.trunc(options.now ?? clock());
+    if (!status) {
+      const rows = listAllStmt.all({ limit, offset });
+      // Called with an empty object rather than no argument, so both paths read
+      // the same and an explicit `undefined` can never become a bound parameter.
+      return { records: rows.map(toRecord), total: countStmt.get({}).total };
+    }
+
+    const params = { status, now };
+    return {
+      records: listByEffectiveStatusStmt.all({ ...params, limit, offset }).map(toRecord),
+      total: countByEffectiveStatusStmt.get(params).total,
+    };
+  }
+
+  /**
+   * Reads the state-change trail for one licence.
+   *
+   * @param {string} licenseId
+   * @param {{limit?: number, offset?: number}} [options]
+   * @returns {Array<{event: string, at: number, installId: string|null, detail: string|null}>}
+   */
+  function listEvents(licenseId, options = {}) {
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 100), 1), 500);
+    const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+    return eventsStmt.all({ licenseId, limit, offset }).map((row) => ({
+      event: row.event,
+      at: row.at,
+      installId: row.install_id ?? null,
+      detail: row.detail ?? null,
+    }));
+  }
+
   return {
     newId,
     insert,
     findByCodeLookup,
     findById,
+    listLicenses,
+    listEvents,
     markActivated,
     markVerified,
     bindAccount,
     setStatus,
+    setNote,
     insertToken,
     findToken,
     touchToken,
@@ -408,7 +509,6 @@ export function createLicenseRepository(db, { clock }) {
     upsertInstall,
     listInstalls,
     recordEvent,
-    /** Exposed for tests and for the admin surface added in a later phase. */
     close() {
       db.close();
     },

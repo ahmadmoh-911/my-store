@@ -25,6 +25,15 @@ export const ERROR_CODES = Object.freeze({
   ACCOUNT_MISMATCH: 'ACCOUNT_MISMATCH',
   /** The bearer session token is unknown, revoked, or malformed. */
   INVALID_SESSION: 'INVALID_SESSION',
+  /**
+   * Authenticated, but not an authorised administrator.
+   *
+   * A separate code from `INVALID_SESSION` on purpose. "Who are you" (401) and
+   * "what may you do" (403) are different answers, and a client that has to
+   * re-authenticate when the real problem is authorisation sends the user
+   * through a pointless login loop.
+   */
+  ADMIN_REQUIRED: 'ADMIN_REQUIRED',
   /** Catch-all for unexpected server faults; details go to the log, not out. */
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 });
@@ -40,6 +49,7 @@ const MESSAGES = Object.freeze({
   [ERROR_CODES.LICENSE_REVOKED]: 'This licence has been revoked.',
   [ERROR_CODES.ACCOUNT_MISMATCH]: 'This licence belongs to a different account.',
   [ERROR_CODES.INVALID_SESSION]: 'The session token is missing, unknown, or revoked.',
+  [ERROR_CODES.ADMIN_REQUIRED]: 'Administrator authorisation is required for this operation.',
   [ERROR_CODES.INTERNAL_ERROR]: 'The server could not complete the request.',
 });
 
@@ -60,6 +70,7 @@ const STATUSES = Object.freeze({
   [ERROR_CODES.LICENSE_REVOKED]: 403,
   [ERROR_CODES.ACCOUNT_MISMATCH]: 403,
   [ERROR_CODES.INVALID_SESSION]: 401,
+  [ERROR_CODES.ADMIN_REQUIRED]: 403,
   [ERROR_CODES.INTERNAL_ERROR]: 500,
 });
 
