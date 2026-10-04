@@ -18,6 +18,7 @@ import {
   listProducts, listSales, listSuppliers, listSupplierInvoices, listSupplierPayments, listPurchases,
   DB_NAME, DB_VERSION,
 } from '../db.js';
+import { getAppVersion } from '../version.js';
 import { pageHead, celebrate, toast, confirmDialog } from '../components.js';
 import { navigate } from '../router.js';
 import { getBackupRecord, clearBackupRecord } from '../identity-store.js';
@@ -313,7 +314,8 @@ async function boot(host) {
         el('b', { text: 'Store Hub' }),
         el('div', { text: 'نظام إدارة متجر الملابس — مخزون، بيع، عملاء وتقارير.' }),
         el('div', { style: 'margin-top:6px', html: `البيانات محفوظة محلياً (IndexedDB · إصدار ${DB_VERSION}) ولا تغادر جهازك.` }),
-        el('div', { style: 'margin-top:6px', text: `التخزين: ${DB_NAME}` })
+        el('div', { style: 'margin-top:6px', text: `التخزين: ${DB_NAME}` }),
+        el('div', { style: 'margin-top:6px', text: `إصدار التطبيق: ${getAppVersion()}` })
       ),
       el(
         'div.about-credits',
