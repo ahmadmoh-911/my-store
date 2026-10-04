@@ -30,7 +30,7 @@ import { openModal, confirmDialog, celebrate, toast } from './components.js';
 import {
   cart, discount, getPaymentMethod, setPaymentMethod, PAYMENT_METHODS,
   subtotal, discountAmount, grandTotal, totalItems,
-  clearCart, setLastSale,
+  clearCart, setLastSale, priceIncrease, setPriceIncrease,
 } from './cart-store.js';
 import { getEntitlement, getEntitlementMessage, ENTITLEMENT_STATE } from './entitlement.js';
 
@@ -117,10 +117,25 @@ export async function confirmAndCompleteSale() {
     const cur = settings.currency;
 
     /* ---- 1 · ask --------------------------------------------------- */
+    // First, ask if the owner wants to add a price increase
+    const increaseInput = await promptDialog({
+      title: 'إضافة مبلغ للبيع',
+      label: 'مبلغ إضافي (اختياري)',
+      value: String(priceIncrease.value || 0),
+      placeholder: '0',
+      confirmLabel: 'متابعة',
+    });
+    if (increaseInput === null) return false;
+    const increaseValue = Math.max(0, Number(increaseInput) || 0);
+    setPriceIncrease(increaseValue);
+
     const yes = await confirmDialog({
       title: 'تأكيد إتمام البيع',
       message:
         `${totalItems()} قطعة · ${cart.length} صنف\n` +
+        `المجموع الفرعي: ${num(subtotal())} ${cur}\n` +
+        (discountAmount() > 0 ? `الخصم: −${num(discountAmount())} ${cur}\n` : '') +
+        (priceIncrease.value > 0 ? `إضافة: +${num(priceIncrease.value)} ${cur}\n` : '') +
         `الإجمالي المستحق: ${num(grandTotal())} ${cur}\n` +
         `طريقة الدفع: ${paymentLabel(getPaymentMethod())}`,
       confirmLabel: 'تأكيد البيع',
@@ -153,6 +168,7 @@ export async function confirmAndCompleteSale() {
       })),
       discountType: discount.type,
       discountValue: discount.value || 0,
+      priceIncrease: priceIncrease.value || 0,
       paymentMethod: getPaymentMethod(),
       receiptSeq: await seqForToday(),
     });
@@ -258,6 +274,14 @@ function receiptEl(sale, settings) {
             el('span', { html: `− ${moneyHTML(sale.discount, cur)}` })
           )
         : null,
+      sale.priceIncrease > 0
+        ? el(
+            'div.totals__row',
+            { style: 'color:var(--emerald)' },
+            el('span', { text: 'إضافة' }),
+            el('span', { html: `+${moneyHTML(sale.priceIncrease, cur)}` })
+          )
+        : null,
       el(
         'div.totals__row',
         { style: 'font-size:16px;font-weight:700;color:var(--ink);padding-top:7px' },
@@ -320,6 +344,7 @@ function receiptText(sale, settings) {
   L.push('--------------------------------');
   L.push(`المجموع الفرعي: ${num(sale.subtotal)} ${cur}`);
   if (sale.discount > 0) L.push(`الخصم: -${num(sale.discount)} ${cur}`);
+  if (sale.priceIncrease > 0) L.push(`إضافة: +${num(sale.priceIncrease)} ${cur}`);
   L.push(`الإجمالي: ${num(sale.total)} ${cur}`);
   L.push(`الدفع: ${paymentLabel(sale.paymentMethod)}`);
   L.push('--------------------------------');

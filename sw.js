@@ -39,10 +39,10 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v18 — Google Drive backup / restore. The licence backend itself lives in
+// v19 — Product view (read-only). The licence backend itself lives in
 // /server and is NOT precached (it runs on a server, not in the phone). PRECACHE
-// gains the four backup modules; BUILD must change whenever PRECACHE does.
-const BUILD = 'v18';
+// gains the product-view module; BUILD must change whenever PRECACHE does.
+const BUILD = 'v19';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -108,6 +108,7 @@ const PRECACHE = [
   './js/backup-scheduler.js',
   './js/drive-client.js',
   './js/drive-auth-client.js',
+  './js/product-view.js',
 
   './vendor/chart.umd.js',
 

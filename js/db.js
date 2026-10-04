@@ -40,7 +40,7 @@
 import { dayKeyOf } from './utils.js';
 
 export const DB_NAME = 'saher_db';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export const STORES = {
   products: 'products',
@@ -50,6 +50,8 @@ export const STORES = {
   supplierInvoices: 'supplierInvoices',
   supplierPayments: 'supplierPayments',
   settings: 'settings',
+  // Stock batches (price lots) for FIFO inventory valuation
+  stockBatches: 'stockBatches',
 };
 
 /* ------------------------------------------------------------------ *
@@ -119,6 +121,12 @@ export function openDB() {
       if (!db.objectStoreNames.contains(STORES.settings)) {
         db.createObjectStore(STORES.settings, { keyPath: 'key' });
       }
+      if (!db.objectStoreNames.contains(STORES.stockBatches)) {
+        const s = db.createObjectStore(STORES.stockBatches, { keyPath: 'id' });
+        s.createIndex('productId', 'productId');
+        s.createIndex('variantKey', 'variantKey');
+        s.createIndex('createdAt', 'createdAt');
+      }
 
       // v3 — the customers store is gone from the app entirely. Drop it from
       // existing databases too, otherwise the old contact list lingers
@@ -153,6 +161,48 @@ export function openDB() {
             scrubbed++;
           }
           cur.continue();
+        };
+      }
+
+      // v5 — introduce stockBatches store. Migrate existing product variants
+      // into initial stock batches so FIFO valuation works from day one.
+      if (e.oldVersion < 5) {
+        const productsStore = req.transaction.objectStore(STORES.products);
+        const batchesStore = req.transaction.objectStore(STORES.stockBatches);
+        const now = new Date().toISOString();
+        let migrated = 0;
+
+        // Use a synchronous loop with a counter since onupgradeneeded is not async
+        const cursorReq = productsStore.openCursor();
+        cursorReq.onsuccess = (ev) => {
+          const cur = ev.target.result;
+          if (!cur) {
+            console.log(`[db] v5 migration: created initial stock batches for ${migrated} product(s)`);
+            return;
+          }
+          const product = cur.value;
+          const variants = product.variants || [];
+          for (const v of variants) {
+            const qty = Number(v.quantity) || 0;
+            if (qty <= 0) continue;
+            const variantKey = `${v.size || ''}|${v.color || ''}`;
+            batchesStore.put({
+              id: crypto.randomUUID(),
+              productId: product.id,
+              variantKey,
+              size: v.size || '',
+              color: v.color || '',
+              quantity: qty,
+              costPrice: Number(product.costPrice) || 0,
+              sellingPrice: Number(product.price) || 0,
+              createdAt: product.createdAt || now,
+            });
+            migrated++;
+          }
+          cur.continue();
+        };
+        cursorReq.onerror = () => {
+          console.error('[db] v5 migration failed:', cursorReq.error);
         };
       }
 
@@ -255,7 +305,7 @@ export async function count(store) {
 
 export const listProducts = () => getAll(STORES.products);
 
-export function saveProduct(product) {
+export async function saveProduct(product) {
   const now = new Date().toISOString();
   const rec = {
     id: product.id,
@@ -278,7 +328,8 @@ export function saveProduct(product) {
     createdAt: product.createdAt || now,
     updatedAt: now,
   };
-  return put(STORES.products, rec);
+  await put(STORES.products, rec);
+  await createInitialStockBatches(rec);
 }
 
 export const deleteProduct = (id) => del(STORES.products, id);
@@ -503,7 +554,7 @@ export const listSales = () => getAll(STORES.sales);
  * @param {Array}  sale.items [{productId, size, color, qty, price, costPrice, name}]
  * @returns {Promise<object>} the stored sale (with id / receiptNo assigned)
  */
-export function createSale(sale) {
+export async function createSale(sale) {
   const id = sale.id || cryptoId();
   // A line with no pieces is not a line: keeping it would put a 0-quantity,
   // 0-total row on the receipt and on the profit report. A line whose
@@ -527,7 +578,8 @@ export function createSale(sale) {
     sale.discountType === 'percent'
       ? round2((subtotal * Math.min(discountValue, 100)) / 100)
       : Math.min(round2(discountValue), subtotal);
-  const total = round2(subtotal - discount);
+  const priceIncrease = nonNeg(sale.priceIncrease || 0);
+  const total = round2(subtotal - discount + priceIncrease);
 
   const record = {
     id,
@@ -537,12 +589,35 @@ export function createSale(sale) {
     discount,
     discountType: sale.discountType || 'fixed',
     discountValue,
+    priceIncrease,
     total,
     paymentMethod: sale.paymentMethod || 'cash',
-    costTotal: items.reduce((t, it) => t + it.qty * (it.costPrice || 0), 0),
+    costTotal: 0, // Will be computed after stock consumption
     timestamp: sale.timestamp || new Date().toISOString(),
     note: sale.note || '',
   };
+
+  // Consume stock from batches (FIFO) and record consumed batches on each item
+  const itemsWithBatches = [];
+  for (const it of items) {
+    const variantKey = `${it.size || ''}|${it.color || ''}`;
+    const consumed = await consumeStockFIFO(it.productId, variantKey, it.qty);
+    const costTotal = consumed.reduce((sum, c) => sum + c.qty * c.costPrice, 0);
+    itemsWithBatches.push({
+      ...it,
+      costPrice: costTotal / it.qty, // weighted average cost for this line
+      costTotal,
+      stockBatchesConsumed: consumed,
+    });
+  }
+
+  // Update record with correct costTotal and batches consumed
+  record.items = itemsWithBatches.map(({ stockBatchesConsumed, ...item }) => item);
+  record.costTotal = itemsWithBatches.reduce((sum, it) => sum + (it.costTotal || 0), 0);
+  // Store consumed batches separately for refund/restore
+  record.stockBatchesConsumed = itemsWithBatches.flatMap((it, idx) =>
+    (it.stockBatchesConsumed || []).map(c => ({ ...c, lineIndex: idx }))
+  );
 
   return multiTx([STORES.sales, STORES.products], 'readwrite', (store) => {
     store(STORES.sales).put(record);
@@ -781,6 +856,235 @@ export function deleteSupplier(id) {
 
 export const listSupplierInvoices = () => getAll(STORES.supplierInvoices);
 export const listSupplierPayments = () => getAll(STORES.supplierPayments);
+
+/**
+ * Lists all stock batches.
+ * @returns {Promise<Array<Object>>}
+ */
+export const listStockBatches = () => getAll(STORES.stockBatches);
+
+/* ------------------------------------------------------------------ *
+ * Stock Batches (price lots) — FIFO inventory valuation
+ * ------------------------------------------------------------------ */
+
+/**
+ * A stock batch represents a single restock lot with its own purchase and
+ * selling prices. This enables FIFO inventory valuation: when selling,
+ * we consume from the oldest batch first, preserving the correct cost
+ * basis and selling price for each unit.
+ *
+ * @typedef {Object} StockBatch
+ * @property {string} id
+ * @property {string} productId
+ * @property {string} variantKey  size|color key (e.g. "L|Red")
+ * @property {string} size
+ * @property {string} color
+ * @property {number} quantity    remaining pieces in this batch
+ * @property {number} costPrice   purchase price per unit
+ * @property {number} sellingPrice selling price per unit
+ * @property {string} createdAt   ISO timestamp
+ */
+
+/**
+ * Creates initial stock batches for a product from its current variants.
+ * Called during v5 migration and when a new product is first saved with stock.
+ * @param {object} product
+ * @returns {Promise<Array<StockBatch>>}
+ */
+export async function createInitialStockBatches(product) {
+  const variants = product.variants || [];
+  const now = new Date().toISOString();
+  const batches = [];
+  for (const v of variants) {
+    const qty = Number(v.quantity) || 0;
+    if (qty <= 0) continue;
+    const batchId = cryptoId();
+    const variantKey = `${v.size || ''}|${v.color || ''}`;
+    const batch = {
+      id: batchId,
+      productId: product.id,
+      variantKey,
+      size: v.size || '',
+      color: v.color || '',
+      quantity: qty,
+      costPrice: Number(product.costPrice) || 0,
+      sellingPrice: Number(product.price) || 0,
+      createdAt: product.createdAt || now,
+    };
+    batches.push(batch);
+  }
+  if (batches.length) {
+    await multiTx([STORES.stockBatches], 'readwrite', (store) => {
+      for (const b of batches) store(STORES.stockBatches).put(b);
+    });
+  }
+  return batches;
+}
+
+/**
+ * Adds a new stock batch (restock) with explicit purchase and selling prices.
+ * If sellingPrice is not provided, uses the product's current selling price.
+ * @param {object} params
+ * @returns {Promise<StockBatch>}
+ */
+export async function addStockBatch({ productId, variantKey, size, color, quantity, costPrice, sellingPrice }) {
+  const batchId = cryptoId();
+  const batch = {
+    id: batchId,
+    productId,
+    variantKey,
+    size: size || '',
+    color: color || '',
+    quantity: Number(quantity) || 0,
+    costPrice: Number(costPrice) || 0,
+    sellingPrice: sellingPrice !== undefined && sellingPrice !== null && sellingPrice !== '' ? Number(sellingPrice) : 0,
+    createdAt: new Date().toISOString(),
+  };
+  await multiTx([STORES.stockBatches], 'readwrite', (store) => {
+    store(STORES.stockBatches).put(batch);
+  });
+  return batch;
+}
+
+/**
+ * Gets all batches for a product variant, ordered by createdAt (oldest first) for FIFO.
+ * @param {string} productId
+ * @param {string} variantKey
+ * @returns {Promise<Array<StockBatch>>}
+ */
+export async function getStockBatches(productId, variantKey) {
+  return new Promise((resolve, reject) => {
+    multiTx([STORES.stockBatches], 'readonly', (store) => {
+      const index = store(STORES.stockBatches).index('variantKey');
+      const req = index.getAll(variantKey);
+      req.onsuccess = () => {
+        const batches = req.result.filter(b => b.productId === productId && b.quantity > 0);
+        batches.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        resolve(batches);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
+}
+
+/**
+ * Consumes stock from batches using FIFO. Returns the consumed batches with
+ * quantities and cost/selling prices for accurate sale recording.
+ * @param {string} productId
+ * @param {string} variantKey
+ * @param {number} qtyToConsume
+ * @returns {Promise<Array<{batchId:string, qty:number, costPrice:number, sellingPrice:number}>>}
+ */
+export async function consumeStockFIFO(productId, variantKey, qtyToConsume) {
+  const batches = await getStockBatches(productId, variantKey);
+  let remaining = qtyToConsume;
+  const consumed = [];
+
+  for (const batch of batches) {
+    if (remaining <= 0) break;
+    const take = Math.min(batch.quantity, remaining);
+    if (take > 0) {
+      consumed.push({
+        batchId: batch.id,
+        qty: take,
+        costPrice: batch.costPrice,
+        sellingPrice: batch.sellingPrice,
+      });
+      // Update batch quantity
+      await multiTx([STORES.stockBatches], 'readwrite', (store) => {
+        store(STORES.stockBatches).put({ ...batch, quantity: batch.quantity - take });
+      });
+      remaining -= take;
+    }
+  }
+
+  if (remaining > 0) {
+    throw new Error(`Insufficient stock: needed ${qtyToConsume}, only ${qtyToConsume - remaining} available`);
+  }
+
+  return consumed;
+}
+
+/**
+ * Restores stock to batches (for refunds). Adds quantity back to the
+ * original batches in reverse FIFO order (most recently consumed first).
+ * @param {Array<{batchId:string, qty:number}>} consumed
+ * @returns {Promise<void>}
+ */
+export async function restoreStockBatches(consumed) {
+  if (!consumed || !consumed.length) return;
+  // Restore in reverse order (last consumed first) to maintain FIFO integrity
+  for (const c of [...consumed].reverse()) {
+    await multiTx([STORES.stockBatches], 'readwrite', (store) => {
+      const req = store(STORES.stockBatches).get(c.batchId);
+      req.onsuccess = () => {
+        const batch = req.result;
+        if (batch) {
+          batch.quantity = (Number(batch.quantity) || 0) + c.qty;
+          store(STORES.stockBatches).put(batch);
+        }
+      };
+    });
+  }
+}
+
+/**
+ * Gets total available stock for a variant across all batches.
+ * @param {string} productId
+ * @param {string} variantKey
+ * @returns {Promise<number>}
+ */
+export async function getAvailableStock(productId, variantKey) {
+  const batches = await getStockBatches(productId, variantKey);
+  return batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+}
+
+/**
+ * Validates that enough stock exists in batches for a sale.
+ * @param {string} productId
+ * @param {string} variantKey
+ * @param {number} qty
+ * @returns {Promise<boolean>}
+ */
+export async function hasStockInBatches(productId, variantKey, qty) {
+  const available = await getAvailableStock(productId, variantKey);
+  return available >= qty;
+}
+
+/**
+ * Records the consumed batches on a sale for later refund/restore.
+ * Adds a `stockBatchesConsumed` array to the sale items.
+ */
+export function recordConsumedBatches(sale) {
+  // This is a placeholder - the actual consumption happens in createSale
+  // and the consumed batches are attached to each sale item.
+  return sale;
+}
+
+/**
+ * Rebuilds stock batches from product variants (emergency repair).
+ * @param {string} productId
+ * @returns {Promise<number>}
+ */
+export async function rebuildStockBatches(productId) {
+  const product = await get(STORES.products, productId);
+  if (!product) return 0;
+  // Delete existing batches for this product
+  await multiTx([STORES.stockBatches], 'readwrite', (store) => {
+    const index = store(STORES.stockBatches).index('productId');
+    const req = index.openCursor(productId);
+    req.onsuccess = (ev) => {
+      const cur = ev.target.result;
+      if (cur) {
+        cur.delete();
+        cur.continue();
+      }
+    };
+  });
+  // Recreate from product variants
+  await createInitialStockBatches(product);
+  return 1;
+}
 
 /**
  * Records a supplier bill.
@@ -1054,7 +1358,7 @@ export function saveSettings(patch) {
  * ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings] =
+  const [products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings, stockBatches] =
     await Promise.all([
       listProducts(),
       listSales(),
@@ -1063,6 +1367,7 @@ export async function exportAll() {
       listSupplierInvoices(),
       listSupplierPayments(),
       getSettings(),
+      listStockBatches(),
     ]);
   return {
     app: 'saher',
@@ -1074,6 +1379,7 @@ export async function exportAll() {
     suppliers,
     supplierInvoices,
     supplierPayments,
+    stockBatches,
     settings,
   };
 }

@@ -19,6 +19,8 @@ export const cart = [];
 
 export const discount = { type: 'fixed', value: 0 };
 
+export const priceIncrease = { value: 0 };
+
 let paymentMethod = 'cash';
 
 /** The most recent completed sale, so the receipt sheet can reopen it. */
@@ -89,7 +91,7 @@ export function discountAmount(sub = subtotal()) {
   return Math.min(sub, v);
 }
 
-export const grandTotal = () => Math.max(0, subtotal() - discountAmount());
+export const grandTotal = () => Math.max(0, subtotal() - discountAmount() + priceIncreaseAmount());
 
 /**
  * The one supported way to touch the discount.
@@ -102,6 +104,16 @@ export function setDiscount(type, value) {
   discount.type = type === 'percent' ? 'percent' : 'fixed';
   discount.value = Math.max(0, Number(value) || 0);
   return discount.value;
+}
+
+export function priceIncreaseAmount(sub = subtotal()) {
+  const v = Math.max(0, Number(priceIncrease.value) || 0);
+  return v;
+}
+
+export function setPriceIncrease(value) {
+  priceIncrease.value = Math.max(0, Number(value) || 0);
+  return priceIncrease.value;
 }
 
 /* ------------------------------------------------------------------ *

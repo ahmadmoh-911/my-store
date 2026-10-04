@@ -35,13 +35,14 @@ const nonNeg = (v) => {
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
 
-function totalsOf(items, discountType, discountValue) {
+function totalsOf(items, discountType, discountValue, priceIncrease = 0) {
   const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
   const v = nonNeg(discountValue);
   const discount = discountType === 'percent'
     ? round2((subtotal * Math.min(v, 100)) / 100)
     : Math.min(round2(v), subtotal);
-  return { subtotal: round2(subtotal), discount, total: round2(subtotal - discount) };
+  const increase = nonNeg(priceIncrease);
+  return { subtotal: round2(subtotal), discount, increase, total: round2(subtotal - discount + increase) };
 }
 
 /**
@@ -54,6 +55,7 @@ export function openInvoiceSheet(sale, opts = {}) {
     items: (sale.items || []).map((it) => ({ ...it })),
     discountType: sale.discountType || 'fixed',
     discountValue: Math.max(0, Number(sale.discountValue) || 0),
+    priceIncrease: Math.max(0, Number(sale.priceIncrease) || 0),
     paymentMethod: sale.paymentMethod || 'cash',
     note: sale.note || '',
   };
@@ -65,6 +67,7 @@ export function openInvoiceSheet(sale, opts = {}) {
     items: draft.items.map((it) => ({ ...it })),
     discountType: draft.discountType,
     discountValue: draft.discountValue,
+    priceIncrease: draft.priceIncrease,
     paymentMethod: draft.paymentMethod,
     note: draft.note,
   };
@@ -73,6 +76,7 @@ export function openInvoiceSheet(sale, opts = {}) {
     draft.items = pristine.items.map((it) => ({ ...it }));
     draft.discountType = pristine.discountType;
     draft.discountValue = pristine.discountValue;
+    draft.priceIncrease = pristine.priceIncrease;
     draft.paymentMethod = pristine.paymentMethod;
     draft.note = pristine.note;
   }
@@ -100,7 +104,7 @@ export function openInvoiceSheet(sale, opts = {}) {
   function paint() {
     clear(body);
     clear(foot);
-    const t = totalsOf(draft.items, draft.discountType, draft.discountValue);
+    const t = totalsOf(draft.items, draft.discountType, draft.discountValue, draft.priceIncrease);
 
     if (!editing) body.appendChild(readOnly(t));
     else body.appendChild(editor(t));
@@ -201,6 +205,9 @@ export function openInvoiceSheet(sale, opts = {}) {
         t.discount > 0.004
           ? el('div.inv-total.inv-total--off', {}, el('span', { text: `الخصم${draft.discountType === 'percent' ? ` (${draft.discountValue}%)` : ''}` }), el('span', { html: `−${moneyHTML(t.discount, currency)}` }))
           : null,
+        t.increase > 0.004
+          ? el('div.inv-total', { style: 'color:var(--emerald)' }, el('span', { text: 'إضافة' }), el('span', { html: `+${moneyHTML(t.increase, currency)}` }))
+          : null,
         el('div.inv-total.inv-total--grand', {}, el('span', { text: 'الإجمالي' }), el('span', { html: moneyHTML(t.total, currency) }))
       ),
 
@@ -285,11 +292,17 @@ export function openInvoiceSheet(sale, opts = {}) {
             onChange: (e) => { draft.paymentMethod = e.target.value; paint(); },
           }, ...PAYMENTS.map((p) => el('option', { value: p.id, selected: p.id === draft.paymentMethod, text: p.label }))))
       ),
-      totalsHost
-    );
+        el('div.inv-field', {},
+          el('label.inv-field__label', { text: 'إضافة للمبلغ' }),
+          el('input.input', {
+            type: 'number', step: '0.01', min: '0',
+            inputmode: 'decimal', value: String(draft.priceIncrease),
+            onInput: (e) => { draft.priceIncrease = nonNeg(e.target.value); refreshTotalsOnly(); },
+            onBlur: (e) => { e.target.value = String(nonNeg(e.target.value)); },
+          })),
+        totalsHost
+      );
   }
-
-  /**
    * Recomputes the totals block in place. Used while typing a price or a
    * discount: a full repaint would steal focus mid-keystroke.
    */

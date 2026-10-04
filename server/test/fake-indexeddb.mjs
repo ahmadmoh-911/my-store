@@ -106,6 +106,25 @@ export function createFakeIndexedDB() {
       this._indexes.delete(name);
       this.indexNames = indexNameList(this._indexes);
     }
+    index(name) {
+      const idx = this._indexes.get(name);
+      if (!idx) return null;
+      const self = this;
+      return {
+        name: idx.name,
+        keyPath: idx.keyPath,
+        getAll() {
+          const req = new FakeRequest();
+          req.succeed([...self._data.values()].map(clone));
+          return req;
+        },
+        get(key) {
+          const req = new FakeRequest();
+          req.succeed(null); // Simplified - real index would look up by key
+          return req;
+        },
+      };
+    }
     /**
      * Yields nothing, once.
      *

@@ -177,7 +177,7 @@ let serialised;
   serialised = backup.serialiseBackup(envelope);
 
   eq('the format is identified', envelope.format, backup.BACKUP_FORMAT);
-  eq('the version is 1', envelope.version, 1);
+  eq('the version is 2', envelope.version, 2);
   eq('it is a number', typeof envelope.version, 'number');
   eq('the creation time is carried', envelope.createdAt, '2026-03-01T00:00:00.000Z');
   eq('the app version is carried', envelope.appVersion, '1.0.0');
@@ -204,7 +204,7 @@ let serialised;
   // The counts block agrees with the arrays, because Settings shows it to a
   // person deciding whether to restore.
   eq('counts are recorded', envelope.counts, {
-    products: 2, sales: 1, purchases: 1, suppliers: 1, supplierInvoices: 0, supplierPayments: 0,
+    products: 2, sales: 1, purchases: 1, suppliers: 1, supplierInvoices: 0, supplierPayments: 0, stockBatches: 3,
   });
 
   // Business fields survive — a backup of nothing but ids would be useless.
@@ -242,9 +242,9 @@ let serialised;
     if (copy.settings) delete copy.settings.logo;
     return copy;
   };
-  const { products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings } = live;
+  const { products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, settings } = live;
   const expectedData = stripForCompareWithImages({
-    products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings,
+    products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, settings,
   });
   const actualData = JSON.parse(JSON.stringify(stripForCompare(envelope.data)));
   // `exportAll` stamps `exportedAt`/`version` at the top level only; the sections
@@ -383,17 +383,16 @@ section('3 · format identity and versioning');
 
 {
   eq('the format string is stable', backup.BACKUP_FORMAT, 'storehub-backup');
-  eq('the backup version is 1', backup.BACKUP_VERSION, 1);
+  eq('the backup version is 2', backup.BACKUP_VERSION, 2);
   ok('the backup version is not the database version', backup.BACKUP_VERSION !== db.DB_VERSION,
     `both are ${backup.BACKUP_VERSION}`);
-  ok('the migration registry exists and is empty at v1',
-    typeof backup.MIGRATIONS === 'object' && Object.keys(backup.MIGRATIONS).length === 0);
+  ok('the migration registry has v1->v2 migration', typeof backup.MIGRATIONS === 'object' && Object.keys(backup.MIGRATIONS).length === 1 && typeof backup.MIGRATIONS[1] === 'function');
 
   const parsed = backup.deserialiseBackup(serialised);
   ok('the file parses back', parsed.ok === true);
-  eq('to the same version', parsed.value.version, 1);
+  eq('to the same version', parsed.value.version, 2);
 
-  const newer = backup.migrateBackup({ ...envelope, version: 2 });
+  const newer = backup.migrateBackup({ ...envelope, version: 3 });
   ok('a newer version is refused, not guessed at', newer.ok === false);
   eq('with a specific code', newer.code, 'UNSUPPORTED_VERSION');
   ok('and an actionable message', /تحديث|أحدث/.test(newer.message));
@@ -440,7 +439,7 @@ const BAD_CASES = [
   },
   {
     label: 'a newer format version',
-    text: JSON.stringify({ ...envelope, version: 2 }),
+    text: JSON.stringify({ ...envelope, version: 3 }),
     code: 'UNSUPPORTED_VERSION',
   },
   {
@@ -928,7 +927,7 @@ section('8 · a successful backup records only what it must');
   ok('the backup succeeded', outcome.ok === true, `reason=${outcome.reason} error=${outcome.error}`);
   eq('the file id was recorded', record.fileId, fileId);
   eq('the folder id was recorded', record.folderId, folderId);
-  eq('the format version was recorded', record.formatVersion, 1);
+  eq('the format version was recorded', record.formatVersion, 2);
   eq('the success time was recorded', record.lastSuccessAt, '2026-03-01T00:00:00.000Z');
   eq('the status is ok', record.status, 'ok');
   ok('a byte count was recorded', typeof record.bytes === 'number' && record.bytes > 0);

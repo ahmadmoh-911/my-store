@@ -422,6 +422,10 @@ function productCard(p, cur, threshold, index) {
     e.stopPropagation();
     navigate(`product/${p.id}`);
   };
+  const view = (e) => {
+    e.stopPropagation();
+    navigate(`product/${p.id}/view`);
+  };
 
   return el(
     'article.pcard',
@@ -464,8 +468,10 @@ function productCard(p, cur, threshold, index) {
         {},
         el('button.pill-btn.pill-btn--sm.pill-btn--restock', { type: 'button', onClick: restock },
           fromHTML(icon('box')), el('span', { text: 'تجديد الكمية' })),
+        el('button.pill-btn.pill-btn--sm.pill-btn--view', { type: 'button', onClick: view },
+          fromHTML(icon('eye')), el('span', { text: 'عرض' })),
         el('button.pill-btn.pill-btn--sm.pill-btn--edit', { type: 'button', onClick: edit },
-          fromHTML(icon('pencil')), el('span', { text: 'تعديل البيانات' }))
+          fromHTML(icon('pencil')), el('span', { text: 'تعديل' }))
       )
     )
   );
@@ -474,6 +480,19 @@ function productCard(p, cur, threshold, index) {
 function productRow(p, cur, threshold, index) {
   const stock = stockOf(p);
   const sizes = sizesOf(p);
+
+  const restock = (e) => {
+    e.stopPropagation();
+    openRestockSheet(p, { onDone: () => paint() });
+  };
+  const edit = (e) => {
+    e.stopPropagation();
+    navigate(`product/${p.id}`);
+  };
+  const view = (e) => {
+    e.stopPropagation();
+    navigate(`product/${p.id}/view`);
+  };
 
   return el(
     'article.prow',
@@ -519,6 +538,8 @@ function productRow(p, cur, threshold, index) {
           type: 'button',
           onClick: (e) => { e.stopPropagation(); openRestockSheet(p, { onDone: () => paint() }); },
         }, fromHTML(icon('box')), el('span', { text: 'تجديد' })),
+        el('button.pill-btn.pill-btn--sm.pill-btn--view', { type: 'button', onClick: view },
+          fromHTML(icon('eye')), el('span', { text: 'عرض' })),
         el('button.pill-btn.pill-btn--sm.pill-btn--edit', {
           type: 'button',
           onClick: (e) => { e.stopPropagation(); navigate(`product/${p.id}`); },

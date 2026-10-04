@@ -66,8 +66,10 @@ export const BACKUP_FORMAT = 'storehub-backup';
  * `BACKUP_VERSION` moves only when the *file format* changes, and it is the
  * number a future importer reads to decide how to read the file. Bumping this is
  * a compatibility promise; bumping `DB_VERSION` is not.
+ *
+ * Version 2 adds the `stockBatches` section for FIFO inventory valuation.
  */
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
 
 /**
  * One deterministic filename, overwritten in place.
@@ -202,6 +204,7 @@ export const BACKUP_SECTIONS = Object.freeze([
   'suppliers',
   'supplierInvoices',
   'supplierPayments',
+  'stockBatches',
 ]);
 
 /** Sections that must be arrays in every valid envelope. */
@@ -230,6 +233,7 @@ export function buildBackupEnvelope(snapshot, meta = {}) {
     suppliers: snapshot.suppliers || [],
     supplierInvoices: snapshot.supplierInvoices || [],
     supplierPayments: snapshot.supplierPayments || [],
+    stockBatches: snapshot.stockBatches || [],
     settings: snapshot.settings || {},
   });
 
@@ -301,7 +305,18 @@ export function deserialiseBackup(text) {
  *
  * @type {Record<number, (envelope: object) => object>}
  */
-export const MIGRATIONS = Object.freeze({});
+export const MIGRATIONS = Object.freeze({
+  1: (envelope) => {
+    // v1 → v2: add empty stockBatches section
+    return {
+      ...envelope,
+      data: {
+        ...envelope.data,
+        stockBatches: [],
+      },
+    };
+  },
+});
 
 /**
  * Brings an envelope up to the current version.

@@ -140,6 +140,7 @@ function renderDayNav(root) {
       el(
         'div.daynav__label',
         {},
+        fromHTML(icon('calendar')),
         el('span.daynav__day', { text: day }),
         el('span.daynav__sub', { text: isToday(viewDate) ? new Date().toLocaleDateString('ar-EG', { weekday: 'long' }) : fmtDayName(viewDate) })
       ),

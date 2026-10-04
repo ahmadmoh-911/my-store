@@ -14,6 +14,7 @@ import { clear, escapeHTML } from './utils.js';
 import dashboardScreen from './screens/dashboard.js';
 import productsScreen from './screens/products.js';
 import productFormScreen from './screens/product-form.js';
+import productViewScreen from './screens/product-view.js';
 import posScreen from './screens/pos.js';
 import suppliersScreen from './screens/suppliers.js';
 import reportsScreen from './screens/reports.js';
@@ -26,6 +27,7 @@ export const ROUTES = [
   { order: 0, match: /^dashboard$/, nav: 'dashboard', screen: dashboardScreen },
   { order: 1, match: /^products$/, nav: 'products', screen: productsScreen },
   { order: 2, match: /^product\/(new|[\w-]+)$/, nav: 'products', screen: productFormScreen },
+  { order: 2.5, match: /^product\/([\w-]+)\/view$/, nav: 'products', screen: productViewScreen },
   { order: 3, match: /^pos(?:\/([\w-]+))?$/, nav: 'pos', screen: posScreen },
   { order: 4, match: /^suppliers$/, nav: 'suppliers', screen: suppliersScreen },
   // The id MUST be captured: the router hands screens `m.slice(1)`, so without

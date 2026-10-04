@@ -17,6 +17,7 @@ import { el, fromHTML, clear, numInt, moneyHTML, isoDate, sum } from './utils.js
 import { openSheet, emptyState, toast, celebrate } from './components.js';
 import {
   listSuppliers, saveSupplier, createPurchase, listProducts, stockOf,
+  addStockBatch,
 } from './db.js';
 
 /** The rows the sheet edits: one per existing variant, or a single blank one. */
@@ -253,7 +254,16 @@ export function openRestockSheet(product, { onDone } = {}) {
           inputmode: 'decimal',
           placeholder: 'اتركه فارغاً للإبقاء',
           value: state.newPrice,
-          oninput: (e) => (state.newPrice = e.target.value),
+          oninput: (e) => {
+            const v = e.target.value;
+            // A negative new selling price is refused visibly; empty still means
+            // "leave the price alone", which is why this is not `Math.max`.
+            if (v !== '' && !(parseFloat(v) >= 0)) {
+              e.target.value = '';
+              return;
+            }
+            state.newPrice = v;
+          },
         })
       )
     ),
@@ -339,6 +349,20 @@ export function openRestockSheet(product, { onDone } = {}) {
         suppliers.push({ id: supplierId, name: supplierName });
       } else {
         supplierName = suppliers.find((s) => s.id === supplierId)?.name || '';
+      }
+
+      // Add stock batches with explicit purchase and selling prices
+      for (const line of lines) {
+        const variantKey = `${line.size || ''}|${line.color || ''}`;
+        await addStockBatch({
+          productId: product.id,
+          variantKey,
+          size: line.size,
+          color: line.color,
+          quantity: line.qty,
+          costPrice: state.unitCost,
+          sellingPrice: state.newPrice === '' ? null : state.newPrice,
+        });
       }
 
       const { record } = await createPurchase({
