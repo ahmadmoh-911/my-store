@@ -16,6 +16,8 @@ import { openLicenseDatabase } from '../src/sqlite.js';
 import { createLicenseService } from '../src/service.js';
 import { createRequestHandler } from '../src/http.js';
 import { generateLicenseCode } from '../src/codes.js';
+import { openAuthDatabase } from '../src/auth-repository.js';
+import { createAuthService } from '../src/auth-service.js';
 
 /**
  * A pepper long enough to satisfy the production length check, fixed so that a
@@ -106,13 +108,25 @@ export function createTestService(options = {}) {
  * codes, and the envelope are all part of the contract, and a test that calls
  * the service directly would pass even if the route layer were broken.
  *
- * @param {{service: object, config: object}} app
+ * @param {{licenseService?: object, authService?: object, service?: object, config: object}} app
  * @param {string} path
  * @param {{method?: string, body?: unknown, headers?: Record<string,string>}} [options]
  * @returns {Promise<{status: number, body: any, headers: Record<string, any>}>}
  */
 export async function request(app, path, options = {}) {
-  const handle = createRequestHandler({ service: app.service, config: app.config });
+  // Backward compatibility: accept `service` as alias for `licenseService`
+  const licenseService = app.licenseService ?? app.service;
+  // Minimal authService stub for tests that don't provide one
+  const authService = app.authService ?? {
+    startAuth() { throw new Error('auth not configured'); },
+    completeAuth() { throw new Error('auth not configured'); },
+    getMe() { return null; },
+    logout() { return false; },
+    revokeAllSessions() { return 0; },
+    serverNow: () => Date.now(),
+    getPublicConfig() { return {}; },
+  };
+  const handle = createRequestHandler({ licenseService, authService, config: app.config });
   const method = options.method ?? 'POST';
   const payload = options.body === undefined ? '' : JSON.stringify(options.body);
 
@@ -174,4 +188,33 @@ export async function request(app, path, options = {}) {
 /** @returns {string} a syntactically valid code that belongs to nobody. */
 export function unknownValidCode() {
   return generateLicenseCode();
+}
+
+/**
+ * Builds an auth service on the same in-memory database as the licence service.
+ *
+ * @param {{service: object, repository: object, config: object, now: Function}} app
+ * @returns {Promise<{authService: object, authRepository: object, authDb: object, config: object, close: Function}>}
+ */
+export async function createTestAuthService(app) {
+  const authDb = await openAuthDatabase(':memory:', {
+    clock: () => app.now(),
+    pepper: app.config.pepper,
+  });
+  const authService = createAuthService({
+    authRepository: authDb.repo,
+    config: app.config,
+    clock: () => app.now(),
+    log: () => {},
+  });
+
+  return {
+    authService,
+    authRepository: authDb.repo,
+    authDb: authDb.db,
+    config: app.config,
+    close() {
+      authDb.repo.close();
+    },
+  };
 }

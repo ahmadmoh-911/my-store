@@ -56,6 +56,8 @@ export const IDENTITY_STORES = Object.freeze({
   device: 'device',
   /** Entitlement cache: licence id, status, and verification timestamps. */
   license: 'license',
+  /** Auth session: backend-issued session token and expiry. */
+  authSession: 'authSession',
 });
 
 const RECORD_KEY = 'current';
@@ -378,22 +380,62 @@ export function clearLicenseRecord() {
   return deleteRecord(IDENTITY_STORES.license);
 }
 
+/* ------------------------------------------------------------------ *
+ * Auth session (backend-issued, not Google tokens)
+ * ------------------------------------------------------------------ */
+
+/**
+ * @returns {Promise<object|null>} cached auth session, or null.
+ *   Contains: sessionToken, expiresAt, googleSub, email, displayName, avatarUrl
+ */
+export function getAuthSession() {
+  return readRecord(IDENTITY_STORES.authSession);
+}
+
+/**
+ * Stores the auth session returned by the backend.
+ *
+ * @param {{sessionToken: string, expiresAt: number, googleSub: string, email: string, displayName?: string, avatarUrl?: string}} session
+ */
+export async function saveAuthSession(session) {
+  return writeRecord(IDENTITY_STORES.authSession, {
+    ...session,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** Clears the auth session. Does not touch account or licence data. */
+export function clearAuthSession() {
+  return deleteRecord(IDENTITY_STORES.authSession);
+}
+
+/** @returns {Promise<boolean>} true if a valid (non-expired) auth session exists. */
+export async function hasValidAuthSession() {
+  const session = await getAuthSession();
+  if (!session || !session.sessionToken) return false;
+  if (session.expiresAt && Date.now() >= session.expiresAt) {
+    await clearAuthSession();
+    return false;
+  }
+  return true;
+}
+
 /**
  * Everything in the identity database, in one round trip.
  *
- * A fresh database returns `{ device: null, account: null, license: null }` —
+ * A fresh database returns `{ device: null, account: null, license: null, authSession: null }` —
  * the same shape as a populated one, so a caller never has to distinguish
  * "nothing stored yet" from "missing key".
  *
- * @returns {Promise<{device: object|null, account: object|null, license: object|null}>}
+ * @returns {Promise<{device: object|null, account: object|null, license: object|null, authSession: object|null}>}
  */
 export async function readIdentitySummary() {
   const db = await getIdentityDb();
-  const names = [IDENTITY_STORES.device, IDENTITY_STORES.account, IDENTITY_STORES.license];
+  const names = [IDENTITY_STORES.device, IDENTITY_STORES.account, IDENTITY_STORES.license, IDENTITY_STORES.authSession];
   const tx = db.transaction(names, 'readonly');
   const found = await Promise.all(names.map((n) => fromRequest(tx.objectStore(n).get(RECORD_KEY))));
-  const [device, account, license] = found.map((v) => (v === undefined ? null : v));
-  return { device, account, license };
+  const [device, account, license, authSession] = found.map((v) => (v === undefined ? null : v));
+  return { device, account, license, authSession };
 }
 
 /**

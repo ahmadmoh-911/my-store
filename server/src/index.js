@@ -1,7 +1,7 @@
 /**
- * `node server/src/index.js` — runs the licence backend.
+ * `node server/src/index.js` — runs the licence + auth backend.
  *
- * Wiring only: read config, open the database, build the service, listen. No
+ * Wiring only: read config, open the database, build the services, listen. No
  * logic belongs here; anything that does is logic that the tests cannot reach
  * without starting a socket.
  */
@@ -11,12 +11,14 @@ import { dirname } from 'node:path';
 
 import { loadConfig } from './config.js';
 import { openLicenseDatabase } from './sqlite.js';
+import { openAuthDatabase } from './auth-repository.js';
 import { createLicenseService } from './service.js';
+import { createAuthService } from './auth-service.js';
 import { createLicenseServer } from './http.js';
 
 /**
  * @param {{env?: NodeJS.ProcessEnv}} [options]
- * @returns {{service: object, config: object, log: Function, close: () => void}}
+ * @returns {{config: object, licenseService: object, authService: object, log: Function, close: () => void}}
  */
 export function buildApplication(options = {}) {
   const config = loadConfig(options.env ?? process.env);
@@ -36,12 +38,18 @@ export function buildApplication(options = {}) {
   // first open rather than surfacing ENOENT as a confusing startup error.
   if (!config.useMemoryDb) mkdirSync(dirname(config.databaseFile), { recursive: true });
 
-  const repository = openLicenseDatabase(config.databaseFile, {
+  const licenseRepository = openLicenseDatabase(config.databaseFile, {
     clock: () => Date.now(),
   });
-  const service = createLicenseService({ repository, config, clock: () => Date.now(), log });
+  const licenseService = createLicenseService({ repository: licenseRepository.repo, config, clock: () => Date.now(), log });
 
-  return { config, service, log, close: () => repository.close() };
+  const authRepo = openAuthDatabase(config.databaseFile, {
+    clock: () => Date.now(),
+    pepper: config.pepper,
+  });
+  const authService = createAuthService({ authRepository: authRepo.repo, config, clock: () => Date.now(), log });
+
+  return { config, licenseService, authService, log, close: () => { licenseRepository.repo.close(); authRepo.repo.close(); } };
 }
 
 /** @param {unknown} value @returns {string} */
@@ -56,9 +64,9 @@ function safeJson(value) {
 
 /** Starts the server when invoked directly. @returns {Promise<void>} */
 async function main() {
-  const { service, config, log, close } = buildApplication();
+  const { licenseService, authService, config, log, close } = buildApplication();
 
-  const { listen } = createLicenseServer({ service, config, log });
+  const { listen } = createLicenseServer({ licenseService, authService, config, log });
   const address = await listen();
 
   log(`storehub licence backend listening on http://${address.host}:${address.port}`);
@@ -68,6 +76,9 @@ async function main() {
     // Named explicitly, because a dev server that looks like production is how
     // a development pepper reaches a real deployment.
     log('DEVELOPMENT MODE — development pepper in use unless STOREHUB_PEPPER is set');
+    if (!config.google.clientId) {
+      log('Google OAuth not configured — auth endpoints will return configuration errors');
+    }
   }
 
   const shutdown = (signal) => {

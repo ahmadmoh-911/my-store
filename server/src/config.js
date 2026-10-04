@@ -113,5 +113,30 @@ export function loadConfig(env = process.env) {
       maxActivate: Number(env.STOREHUB_RATE_MAX_ACTIVATE || 20),
       maxVerify: Number(env.STOREHUB_RATE_MAX_VERIFY || 120),
     },
+
+    /**
+     * Google OAuth configuration.
+     *
+     * All three are required in production. In development they can be omitted
+     * to allow the server to start without Google credentials, but the auth
+     * endpoints will return configuration errors until they are provided.
+     */
+    google: {
+      clientId: env.GOOGLE_CLIENT_ID || null,
+      clientSecret: env.GOOGLE_CLIENT_SECRET || null,
+      redirectUri: env.GOOGLE_REDIRECT_URI || null,
+    },
+
+    /**
+     * Session configuration.
+     *
+     * Session TTL controls how long a user stays logged in. The backend issues
+     * its own session token (opaque, high-entropy) rather than exposing the
+     * Google refresh token. Sessions are stored server-side and can be revoked.
+     */
+    session: {
+      ttlMs: Number(env.STOREHUB_SESSION_TTL_MS || 30 * 24 * 60 * 60 * 1000), // 30 days
+      cookieName: env.STOREHUB_SESSION_COOKIE || 'storehub_session',
+    },
   };
 }

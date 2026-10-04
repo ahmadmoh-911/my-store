@@ -16,17 +16,52 @@ import { createServer as createHttpServer } from 'node:http';
 import { ERROR_CODES, LicenseError, isLicenseError, errorBody } from './errors.js';
 import { pickClientFields, rejectedClientFields, effectiveStatus } from './model.js';
 
+/** Extracts session token from Cookie header. */
+function extractSessionToken(req) {
+  const cookie = req.headers.cookie || '';
+  const match = cookie.match(/(?:^|;\s*)storehub_session=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+/** Sets the session cookie. */
+function setSessionCookie(res, token, config) {
+  const secure = config.env === 'production' ? '; Secure' : '';
+  const sameSite = config.env === 'production' ? '; SameSite=None' : '; SameSite=Lax';
+  const maxAge = Math.floor(config.session.ttlMs / 1000);
+  res.setHeader('set-cookie', [
+    `storehub_session=${token}; HttpOnly; Path=/; Max-Age=${maxAge}${secure}${sameSite}`,
+  ]);
+}
+
+/** Clears the session cookie. */
+function clearSessionCookie(res, config) {
+  const secure = config.env === 'production' ? '; Secure' : '';
+  const sameSite = config.env === 'production' ? '; SameSite=None' : '; SameSite=Lax';
+  res.setHeader('set-cookie', [
+    `storehub_session=; HttpOnly; Path=/; Max-Age=0${secure}${sameSite}`,
+  ]);
+}
+
 /** Largest request body accepted. A licence request is a few hundred bytes. */
 const MAX_BODY_BYTES = 16 * 1024;
 
 /**
  * Routes, and nothing else. Each entry names the method it accepts so the 405
  * can be produced without a routing library.
+ *
+ * Auth routes support GET for OAuth redirects and session reads.
  */
 const ROUTES = Object.freeze({
-  '/api/license/activate': 'activate',
-  '/api/license/verify': 'verify',
-  '/api/license/bind': 'bind',
+  // Licence endpoints (POST only)
+  '/api/license/activate': { method: 'POST', handler: 'activate' },
+  '/api/license/verify': { method: 'POST', handler: 'verify' },
+  '/api/license/bind': { method: 'POST', handler: 'bind' },
+
+  // Auth endpoints
+  '/api/auth/google/start': { method: 'GET', handler: 'authStart' },
+  '/api/auth/google/callback': { method: 'GET', handler: 'authCallback' },
+  '/api/auth/me': { method: 'GET', handler: 'authMe' },
+  '/api/auth/logout': { method: 'POST', handler: 'authLogout' },
 });
 
 /**
@@ -162,14 +197,23 @@ function clientIp(req, trustProxy) {
 /**
  * Builds the request handler.
  *
+ * Supports both old API ({ service, config }) and new API ({ licenseService, authService, config }).
+ *
  * @param {{
- *   service: ReturnType<typeof import('./service.js').createLicenseService>,
+ *   licenseService?: ReturnType<typeof import('./service.js').createLicenseService>,
+ *   authService?: ReturnType<typeof import('./auth-service.js').createAuthService>,
+ *   service?: ReturnType<typeof import('./service.js').createLicenseService>, // deprecated
  *   config: ReturnType<typeof import('./config.js').loadConfig>,
  *   log?: (message: string, detail?: unknown) => void,
  * }} deps
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
  */
-export function createRequestHandler({ service, config, log = () => {} }) {
+export function createRequestHandler(deps) {
+  // Backward compatibility: accept `service` as alias for `licenseService`
+  const licenseService = deps.licenseService ?? deps.service;
+  const authService = deps.authService;
+  const config = deps.config;
+  const log = deps.log || (() => {});
   const limiter = createRateLimiter({
     windowMs: config.rateLimit.windowMs,
     maxActivate: config.rateLimit.maxActivate,
@@ -210,8 +254,9 @@ export function createRequestHandler({ service, config, log = () => {} }) {
     if (!origin || !config.corsOrigins.includes(origin)) return {};
     return {
       'access-control-allow-origin': origin,
-      'access-control-allow-methods': 'POST, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
       'access-control-allow-headers': 'content-type',
+      'access-control-allow-credentials': 'true',
       'access-control-max-age': '600',
       vary: 'Origin',
     };
@@ -220,6 +265,7 @@ export function createRequestHandler({ service, config, log = () => {} }) {
   return async function handle(req, res) {
     const cors = corsHeaders(req);
     const path = (req.url || '').split('?')[0];
+    const query = new URL(req.url || '', `http://${req.headers.host}`).searchParams;
 
     if (req.method === 'OPTIONS') {
       // Preflight. Answered from the same allowlist as the real request so the
@@ -229,7 +275,7 @@ export function createRequestHandler({ service, config, log = () => {} }) {
       return;
     }
 
-    const now = service.serverNow();
+    const now = licenseService.serverNow();
     const route = ROUTES[path];
 
     if (!route) {
@@ -242,78 +288,135 @@ export function createRequestHandler({ service, config, log = () => {} }) {
       return;
     }
 
-    if (req.method !== 'POST') {
+    // Check method
+    if (req.method !== route.method) {
       send(
         res,
         405,
         {
           ...errorBody(ERROR_CODES.INVALID_REQUEST, now),
-          allowed: ['POST', 'OPTIONS'],
+          allowed: [route.method, 'OPTIONS'],
         },
-        { ...cors, allow: 'POST, OPTIONS' },
+        { ...cors, allow: `${route.method}, OPTIONS` },
       );
       return;
     }
 
-    const rate = limiter.check(
-      `${clientIp(req, trustProxy)}:${route}`,
-      route === 'verify' ? 'verify' : 'activate',
-      now,
-    );
-    if (!rate.allowed) {
-      send(
-        res,
-        429,
-        errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Too many requests. Try again later.'),
-        { ...cors, 'retry-after': String(rate.retryAfterSeconds) },
+    // Rate limiting for licence endpoints only
+    if (path.startsWith('/api/license/')) {
+      const rate = limiter.check(
+        `${clientIp(req, trustProxy)}:${route.handler}`,
+        route.handler === 'verify' ? 'verify' : 'activate',
+        now,
       );
-      return;
+      if (!rate.allowed) {
+        send(
+          res,
+          429,
+          errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Too many requests. Try again later.'),
+          { ...cors, 'retry-after': String(rate.retryAfterSeconds) },
+        );
+        return;
+      }
     }
 
     try {
-      const body = parseJson(await readBody(req));
-
-      // The client is told what it sent that we discarded. Naming the dropped
-      // keys is how a future client bug becomes visible instead of silent.
-      const discarded = rejectedClientFields(body);
-      if (discarded.length > 0) {
-        log(`discarded unexpected fields on ${path}`, discarded);
+      // Licence endpoints (POST with JSON body)
+      if (path.startsWith('/api/license/')) {
+        const body = parseJson(await readBody(req));
+        const discarded = rejectedClientFields(body);
+        if (discarded.length > 0) {
+          log(`discarded unexpected fields on ${path}`, discarded);
+        }
+        const result = licenseService[route.handler](body);
+        const reported = pickClientFields(body);
+        send(
+          res,
+          200,
+          {
+            ok: true,
+            license: result.license,
+            serverTime: result.serverTime,
+            appVersion: reported.appVersion ?? null,
+            platform: reported.platform ?? null,
+            status: effectiveStatus(result.license, now),
+            ...(route.handler === 'activate'
+              ? {
+                sessionToken: result.sessionToken,
+                linkedAccountId: result.linkedAccountId ?? null,
+              }
+              : {}),
+            ...(route.handler === 'bind' ? { linkedAccountId: result.linkedAccountId ?? null } : {}),
+          },
+          cors,
+        );
+        return;
       }
 
-      const result = service[route](body);
-      const reported = pickClientFields(body);
+      // Auth endpoints
+      if (path === '/api/auth/google/start') {
+        const { authUrl, state } = authService.startAuth();
+        send(res, 200, { ok: true, authUrl, state, serverTime: now }, cors);
+        return;
+      }
 
-      send(
-        res,
-        200,
-        {
-          ok: true,
-          license: result.license,
-          serverTime: result.serverTime,
-          appVersion: reported.appVersion ?? null,
-          platform: reported.platform ?? null,
-          // Echoed so a client that ignored the server's copy can see the
-          // mismatch and fix its own state.
-          status: effectiveStatus(result.license, now),
-          ...(route === 'activate'
-            ? {
-              sessionToken: result.sessionToken,
-              linkedAccountId: result.linkedAccountId ?? null,
-            }
-            : {}),
-          ...(route === 'bind' ? { linkedAccountId: result.linkedAccountId ?? null } : {}),
-        },
-        cors,
-      );
+      if (path === '/api/auth/google/callback') {
+        const code = query.get('code');
+        const state = query.get('state');
+        const error = query.get('error');
+
+        if (error) {
+          log('oauth callback error', { error, state });
+          send(res, 400, { ok: false, error: { code: 'OAUTH_DENIED', message: `Google denied: ${error}` }, serverTime: now }, cors);
+          return;
+        }
+
+        if (!code || !state) {
+          send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'Missing code or state' }, serverTime: now }, cors);
+          return;
+        }
+
+        const userAgent = req.headers['user-agent'] || null;
+        const result = await authService.completeAuth({ code, state, userAgent });
+        setSessionCookie(res, result.sessionToken, config);
+        send(res, 200, { ok: true, ...result }, cors);
+        return;
+      }
+
+      if (path === '/api/auth/me') {
+        const sessionToken = extractSessionToken(req);
+        if (!sessionToken) {
+          send(res, 200, { ok: true, authenticated: false, account: null, serverTime: now }, cors);
+          return;
+        }
+        const result = authService.getMe(sessionToken);
+        if (!result) {
+          clearSessionCookie(res, config);
+          send(res, 200, { ok: true, authenticated: false, account: null, serverTime: now }, cors);
+          return;
+        }
+        send(res, 200, { ok: true, authenticated: true, account: result.account, serverTime: result.serverTime }, cors);
+        return;
+      }
+
+      if (path === '/api/auth/logout') {
+        const sessionToken = extractSessionToken(req);
+        if (sessionToken) {
+          authService.logout(sessionToken);
+        }
+        clearSessionCookie(res, config);
+        send(res, 200, { ok: true, serverTime: now }, cors);
+        return;
+      }
+
+      // Should not reach here
+      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
     } catch (err) {
       if (isLicenseError(err)) {
-        // Client mistakes are logged without detail and answered without it too.
-        if (err.status >= 500) log(`license error ${err.code}`, err.detail);
+        if (err.status >= 500) log(`error ${err.code}`, err.detail);
         send(res, err.status, errorBody(err.code, now), cors);
         return;
       }
-      // Anything unexpected: the caller gets a generic code, the operator gets
-      // the stack. A raw error message can leak a schema or a file path.
       log(`unhandled error on ${path}`, err);
       send(res, 500, errorBody(ERROR_CODES.INTERNAL_ERROR, now), cors);
     }

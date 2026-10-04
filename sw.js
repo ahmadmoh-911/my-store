@@ -39,10 +39,10 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v15 — Store Hub licence layer (license-client). The licence backend itself
+// v16 — Google Auth foundation (auth-client). The licence backend itself
 // lives in /server and is NOT precached (it runs on a server, not in the phone).
 // PRECACHE gains the client integration; BUILD must change whenever PRECACHE does.
-const BUILD = 'v15';
+const BUILD = 'v16';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -94,6 +94,7 @@ const PRECACHE = [
   './js/clock.js',
   './js/identity-store.js',
   './js/license-client.js',
+  './js/auth-client.js',
 
   './vendor/chart.umd.js',
 
