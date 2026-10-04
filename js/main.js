@@ -18,6 +18,8 @@ import { toast, closeTopOverlay } from './components.js';
 import { startRouter, renderNav, setLowStockCount, onRoute, navigate, getPath } from './router.js';
 import { mountCartBar, cartAffordanceVisible, openCart } from './cart-bar.js';
 import { isNative, onNativeBack, minimizeApp } from './native.js';
+import { getEntitlement, getEntitlementMessage, needsOnlineVerification, verifyAndUpdate, ENTITLEMENT_STATE } from './entitlement.js';
+import { isAuthenticatedLocally, getCurrentAccount } from './auth-client.js';
 
 /* ------------------------------------------------------------------ *
  * Service worker
@@ -378,6 +380,52 @@ function wireGlobalHandlers() {
  */
 const SPLASH_MIN_MS = 2500;
 
+/**
+ * Performs the licence entitlement check on startup.
+ * Returns the entitlement object so the app can react if needed.
+ */
+async function checkEntitlementOnStartup() {
+  try {
+    const entitlement = await getEntitlement();
+    console.info('[boot] Entitlement check:', {
+      state: entitlement.state,
+      canSell: entitlement.canSell,
+      licenseStatus: entitlement.license?.status,
+      licenseId: entitlement.license?.licenseId,
+      authGoogleSub: entitlement.authGoogleSub,
+      licenseBoundTo: entitlement.licenseBoundTo,
+    });
+
+    // If we need online verification and we're online, do it now (non-blocking)
+    if (await needsOnlineVerification() && navigator.onLine) {
+      console.info('[boot] Online verification needed, attempting...');
+      try {
+        const { entitlement: newEntitlement } = await verifyAndUpdate();
+        console.info('[boot] Online verification result:', {
+          state: newEntitlement.state,
+          canSell: newEntitlement.canSell,
+        });
+        return newEntitlement;
+      } catch (err) {
+        console.warn('[boot] Online verification failed, using cached entitlement:', err);
+        // Return cached entitlement — the grace period logic will handle offline
+        return entitlement;
+      }
+    }
+
+    return entitlement;
+  } catch (err) {
+    console.error('[boot] Entitlement check failed:', err);
+    // Fail safe — return a blocking entitlement
+    return {
+      state: ENTITLEMENT_STATE.UNACTIVATED,
+      canSell: false,
+      license: null,
+      auth: null,
+    };
+  }
+}
+
 async function boot() {
   const splash = document.getElementById('boot');
   const shell = document.getElementById('shell');
@@ -406,6 +454,12 @@ async function boot() {
 
   buildTopbar();
   paintStoreName();
+
+  // Check licence entitlement early (non-blocking for UI, but logged)
+  // The result is used by checkout.js for enforcement.
+  checkEntitlementOnStartup().catch((err) => {
+    console.error('[boot] Entitlement check failed:', err);
+  });
 
   // The cart lives in document.body, outside #view, so a sale in progress
   // survives every navigation. Mounted before the first screen so it is never

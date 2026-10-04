@@ -118,14 +118,16 @@ export async function activateLicense(licenseCode, options = {}) {
   const result = await postLicense('activate', { licenseCode }, options);
 
   if (result.ok && result.license && result.sessionToken) {
-    // Cache entitlement + session + account linkage + server time.
+    // Cache entitlement + session + account linkage + server time + trusted verification timestamp.
+    const nowIso = new Date().toISOString();
     await import('./identity-store.js').then((mod) => {
       return mod.saveLicenseRecord({
         licenseId: result.license.id,
         status: result.license.status,
         expiresAt: result.license.expiresAt,
-        lastVerifiedAt: new Date().toISOString(),
+        lastVerifiedAt: nowIso,
         lastServerTime: result.serverTime,
+        lastTrustedVerificationAt: nowIso,
         linkedAccountId: result.linkedAccountId ?? null,
       });
     });
@@ -138,7 +140,7 @@ export async function activateLicense(licenseCode, options = {}) {
  * Verifies the current entitlement using the stored session token.
  *
  * Reads the session token from identity-store, calls /verify, and updates
- * the cached entitlement + server time.
+ * the cached entitlement + server time + lastTrustedVerificationAt.
  *
  * @param {LicenseClientOptions} [options]
  * @returns {Promise<{ok: boolean, license?: object, serverTime?: number, error?: {code: string, message: string}}>}
@@ -155,13 +157,17 @@ export async function verifyLicense(options = {}) {
   const result = await postLicense('verify', { sessionToken }, options);
 
   if (result.ok && result.license) {
+    // Store the device wall-clock time of this successful verification.
+    // This is used by the entitlement engine to compute offline grace.
+    const nowIso = new Date().toISOString();
     await import('./identity-store.js').then((mod) => {
       return mod.saveLicenseRecord({
         licenseId: result.license.id,
         status: result.license.status,
         expiresAt: result.license.expiresAt,
-        lastVerifiedAt: new Date().toISOString(),
+        lastVerifiedAt: nowIso,
         lastServerTime: result.serverTime,
+        lastTrustedVerificationAt: nowIso,
         linkedAccountId: cached.linkedAccountId ?? null,
       });
     });
@@ -191,13 +197,16 @@ export async function bindLicense(accountId, options = {}) {
   const result = await postLicense('bind', payload, options);
 
   if (result.ok && result.license && result.linkedAccountId) {
+    // Store the trusted verification timestamp when binding succeeds.
+    const nowIso = new Date().toISOString();
     await import('./identity-store.js').then((mod) => {
       return mod.saveLicenseRecord({
         licenseId: result.license.id,
         status: result.license.status,
         expiresAt: result.license.expiresAt,
-        lastVerifiedAt: new Date().toISOString(),
+        lastVerifiedAt: nowIso,
         lastServerTime: result.serverTime,
+        lastTrustedVerificationAt: nowIso,
         linkedAccountId: result.linkedAccountId,
       });
     });

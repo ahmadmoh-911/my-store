@@ -11,9 +11,10 @@
  * The flow is deliberately three steps and no fewer:
  *
  *   1. ask   — a dialog naming the pieces, the total and the payment method
- *   2. write — ONE IndexedDB transaction writes the invoice AND decrements the
+ *   2. entitlement check — block if licence doesn't allow new sales
+ *   3. write — ONE IndexedDB transaction writes the invoice AND decrements the
  *              exact size+colour variants (db.createSale)
- *   3. clear — the basket empties only after that transaction has committed
+ *   4. clear — the basket empties only after that transaction has committed
  *
  * Nothing is written before the user answers, so a stray double tap cannot
  * produce two invoices; and nothing is emptied unless the write succeeded, so a
@@ -31,6 +32,7 @@ import {
   subtotal, discountAmount, grandTotal, totalItems,
   clearCart, setLastSale,
 } from './cart-store.js';
+import { getEntitlement, getEntitlementMessage, ENTITLEMENT_STATE } from './entitlement.js';
 
 /**
  * One sale at a time.
@@ -77,7 +79,7 @@ function setBusy(next) {
 const paymentLabel = (id) => PAYMENT_METHODS.find((p) => p.id === id)?.label || 'نقداً';
 
 /**
- * Confirm → write → clear → receipt.
+ * Confirm → entitlement check → write → clear → receipt.
  *
  * @returns {Promise<boolean>} whether a sale was actually written
  */
@@ -88,6 +90,26 @@ export async function confirmAndCompleteSale() {
     toast('السلة فارغة — أضف منتجاً أولاً', 'warn');
     return false;
   }
+
+  // --- ENTITLEMENT ENFORCEMENT ---
+  // This is the single authoritative point where a sale is blocked.
+  // The UI may disable buttons, but THIS is the gate that must not be bypassed.
+  const entitlement = await getEntitlement();
+  if (!entitlement.canSell) {
+    const msg = await getEntitlementMessage();
+    toast(msg, 'err', 5000);
+    // Log for debugging
+    console.info('[checkout] Sale blocked by entitlement:', {
+      state: entitlement.state,
+      canSell: entitlement.canSell,
+      licenseStatus: entitlement.license?.status,
+      licenseId: entitlement.license?.licenseId,
+      authGoogleSub: entitlement.authGoogleSub,
+      licenseBoundTo: entitlement.licenseBoundTo,
+    });
+    return false;
+  }
+  // --------------------------------
 
   setBusy(true);
   try {
