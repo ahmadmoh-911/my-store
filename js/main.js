@@ -18,6 +18,7 @@ import { toast, closeTopOverlay } from './components.js';
 import { startRouter, renderNav, setLowStockCount, onRoute, navigate, getPath } from './router.js';
 import { mountCartBar, cartAffordanceVisible, openCart } from './cart-bar.js';
 import { isNative, onNativeBack, minimizeApp } from './native.js';
+import { platformInfo } from './platform.js';
 import { getEntitlement, getEntitlementMessage, needsOnlineVerification, verifyAndUpdate, ENTITLEMENT_STATE } from './entitlement.js';
 import { isAuthenticatedLocally, getCurrentAccount } from './auth-client.js';
 
@@ -426,6 +427,74 @@ async function checkEntitlementOnStartup() {
   }
 }
 
+/**
+ * Runs the weekly Google Drive backup, if everything says it is time.
+ *
+ * This is the whole launch-time integration, and it is deliberately the last
+ * thing boot does and the only thing that is not awaited. Three properties
+ * matter here, and all three are about what happens when this *fails*:
+ *
+ *   1. **It cannot stop the shop opening.** Every gate returns without throwing,
+ *      and the promise is not awaited by `boot`.
+ *   2. **It cannot block selling.** There is no awaiting of the network anywhere
+ *      on the path to a sale.
+ *   3. **A failure is recorded, not shown.** The owner finds out about it in
+ *      Settings, where there is context for what to do, rather than as a toast
+ *      over a screen they were trying to work with.
+ *
+ * A backup is not a synchronisation, so there is no timer here and nothing
+ * scheduled: this runs at most once per launch, and only when the week is up.
+ *
+ * @param {object} entitlement  the result of the startup entitlement check
+ * @returns {Promise<void>}
+ */
+async function runScheduledBackup(entitlement) {
+  try {
+    const { getBackupRecord } = await import('./identity-store.js');
+    const { maybeRunBackup, SKIP } = await import('./backup-scheduler.js');
+    const driveAuth = await import('./drive-auth-client.js');
+
+    const record = await getBackupRecord();
+
+    // `getEntitlement` is a pure local computation, so `authenticated` is read
+    // from the auth session rather than guessed from the entitlement state: a
+    // shop whose licence expired is still a signed-in shop, and it should be
+    // able to see its backup rather than silently losing it.
+    const authenticated = Boolean(entitlement?.auth?.googleSub || entitlement?.authGoogleSub);
+
+    const outcome = await maybeRunBackup({
+      db: { exportAll: () => import('./db.js').then((m) => m.exportAll()) },
+      record,
+      online: navigator.onLine !== false,
+      authenticated,
+      entitled: entitlement?.canSell === true,
+      // Status first, token second. Asking for a token before knowing Drive is
+      // connected would mint a credential on every single launch.
+      driveConnected: await driveAuth
+        .getDriveStatus()
+        .then((s) => s.connected)
+        .catch(() => false),
+      getAccessToken: async () => (await driveAuth.getDriveAccessToken()).accessToken,
+      appVersion: platformInfo().appVersion,
+    });
+
+    // Skips are the normal case and stay in the console at info level; only a
+    // genuine failure is worth a warning.
+    if (outcome.ok) {
+      console.info(`[backup] completed — ${outcome.result.fileId} (${outcome.result.bytes} bytes)`);
+    } else if (outcome.reason === SKIP.NOT_DUE) {
+      console.info('[backup] not due yet');
+    } else if (!outcome.skipped) {
+      console.warn('[backup] failed:', outcome.error);
+    }
+  } catch (err) {
+    // Belt and braces: `maybeRunBackup` already swallows its own failures, so
+    // reaching here means something in the surrounding wiring broke. It still
+    // must not reach the user as an error.
+    console.warn('[backup] skipped:', err?.message || err);
+  }
+}
+
 async function boot() {
   const splash = document.getElementById('boot');
   const shell = document.getElementById('shell');
@@ -457,9 +526,15 @@ async function boot() {
 
   // Check licence entitlement early (non-blocking for UI, but logged)
   // The result is used by checkout.js for enforcement.
-  checkEntitlementOnStartup().catch((err) => {
-    console.error('[boot] Entitlement check failed:', err);
-  });
+  //
+  // The same result is also what decides whether a Google Drive backup is
+  // allowed to run, so it is threaded through rather than read twice: two calls
+  // could disagree about entitlement if one of them landed after a clock change.
+  checkEntitlementOnStartup()
+    .then((entitlement) => runScheduledBackup(entitlement))
+    .catch((err) => {
+      console.error('[boot] Entitlement check failed:', err);
+    });
 
   // The cart lives in document.body, outside #view, so a sale in progress
   // survives every navigation. Mounted before the first screen so it is never

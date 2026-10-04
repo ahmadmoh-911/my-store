@@ -7,14 +7,21 @@
 
 import { ERROR_CODES, LicenseError, errorBody } from './errors.js';
 import { randomBytes, createHash } from 'node:crypto';
+import { DRIVE_SCOPE } from './drive-service.js';
 
 /** Google OAuth endpoints */
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_URL = 'https://www.googleapis.com/oauth2/v3/userinfo';
 
-/** Scopes we request — only what we need for identity. */
-const GOOGLE_SCOPES = ['openid', 'email', 'profile'];
+/**
+ * Scopes we request for plain sign-in — identity only.
+ *
+ * Deliberately no Drive scope. A shop owner who signs in to use the till should
+ * not be shown a Drive consent screen they did not ask for; Drive is opted into
+ * later, on purpose, from Settings.
+ */
+const IDENTITY_SCOPES = ['openid', 'email', 'profile'];
 
 /** PKCE code verifier length (43-128 chars per RFC 7636) */
 const PKCE_VERIFIER_LENGTH = 64;
@@ -40,15 +47,21 @@ function generatePkce() {
  *   redirectUri: string,
  *   state: string,
  *   codeChallenge: string,
+ *   drive?: boolean,
  * }} params
  * @returns {string}
  */
-function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge }) {
+function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge, drive }) {
+  // `drive.file` is appended only when the caller asked for Drive, so an ordinary
+  // sign-in asks for identity and nothing else. Google merges scopes per client,
+  // so a user who connects Drive later is not re-prompted for it at every
+  // subsequent sign-in.
+  const scopes = drive ? [...IDENTITY_SCOPES, DRIVE_SCOPE] : IDENTITY_SCOPES;
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: GOOGLE_SCOPES.join(' '),
+    scope: scopes.join(' '),
     state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
@@ -153,14 +166,15 @@ function validateGoogleConfig(config) {
  *   config: ReturnType<typeof import('./config.js').loadConfig>,
  *   clock: () => number,
  *   log?: (message: string, detail?: unknown) => void,
+ *   driveGrantSink?: {recordGrant: (g: {googleSub: string, refreshToken: string, scopes?: string}) => any} | null,
  * }} deps
  */
-export function createAuthService({ authRepository, config, clock, log = () => {} }) {
+export function createAuthService({ authRepository, config, clock, log = () => {}, driveGrantSink = null }) {
   const now = clock;
 
   // In-memory PKCE verifier store (keyed by state). In production with multiple
   // instances this would need a shared store, but for now it's fine.
-  /** @type {Map<string, {verifier: string, expiresAt: number, intent: string}>} */
+  /** @type {Map<string, {verifier: string, expiresAt: number, intent: string, drive: boolean}>} */
   const pkceStore = new Map();
 
   /**
@@ -175,15 +189,26 @@ export function createAuthService({ authRepository, config, clock, log = () => {
    * *finished* at another. The admin portal uses it to keep its flow apart from
    * the customer flow: without it, an admin callback would accept a state
    * minted by the customer route, and the two entry points would stop being
-   * separately auditable.
+   * separately auditable. The Drive-connect flow is a third intent for the same
+   * reason — a consent granted for backups must be finishable only where it was
+   * started.
    *
-   * @param {{intent?: 'customer'|'admin'}} [options]
+   * `drive: true` adds the `drive.file` scope to this consent. It is opt-in per
+   * flow: signing in to run the till asks for identity only, and Drive is
+   * requested separately when the owner actually turns backups on.
+   *
+   * @param {{intent?: 'customer'|'admin'|'drive', drive?: boolean}} [options]
    * @returns {{authUrl: string, state: string, intent: string}}
    */
   function startAuth(options = {}) {
     validateGoogleConfig(config);
 
-    const intent = options.intent === 'admin' ? 'admin' : 'customer';
+    const intent = options.intent === 'admin' ? 'admin' : options.intent === 'drive' ? 'drive' : 'customer';
+    // A Drive grant can only be requested from the Drive entry point. Letting
+    // `drive: true` ride along on a plain sign-in would quietly widen consent
+    // for everyone who logs in, which is the opposite of opt-in.
+    const drive = intent === 'drive' && options.drive !== false;
+
     const { verifier, challenge } = generatePkce();
     const state = randomBytes(16).toString('base64url');
     const authUrl = buildGoogleAuthUrl({
@@ -191,10 +216,11 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       redirectUri: config.google.redirectUri,
       state,
       codeChallenge: challenge,
+      drive,
     });
 
     // Store PKCE verifier with a short TTL (10 minutes)
-    pkceStore.set(state, { verifier, expiresAt: now() + 10 * 60 * 1000, intent });
+    pkceStore.set(state, { verifier, expiresAt: now() + 10 * 60 * 1000, intent, drive });
 
     // Cleanup old entries periodically
     if (pkceStore.size > 1000) {
@@ -258,6 +284,24 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       avatarUrl: googleUser.picture ?? null,
     });
 
+    // Hand the Drive grant straight to its sealed store.
+    //
+    // `driveGrantSink` is a plain injected function rather than a Drive
+    // dependency, so this module never imports the Drive service and the
+    // refresh token travels from the token exchange directly into encrypted
+    // storage — never through an HTTP layer, a response body, or this function's
+    // return value. A user who re-consents without Drive sends no refresh token
+    // for the Drive scope, which is the only case where `tokens.refresh_token` is
+    // absent.
+    let driveGranted = null;
+    if (pkceEntry.drive && tokens.refresh_token && typeof driveGrantSink?.recordGrant === 'function') {
+      driveGranted = driveGrantSink.recordGrant({
+        googleSub: account.googleSub,
+        refreshToken: tokens.refresh_token,
+        scopes: DRIVE_SCOPE,
+      });
+    }
+
     // Create session
     const { sessionToken, sessionRecord } = authRepository.createSession(
       account.googleSub,
@@ -265,11 +309,18 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       userAgent,
     );
 
-    log('oauth complete', { intent: pkceEntry.intent, googleSub: account.googleSub });
+    log('oauth complete', {
+      intent: pkceEntry.intent,
+      googleSub: account.googleSub,
+      driveGranted: Boolean(driveGranted),
+    });
 
     return {
       sessionToken,
       intent: pkceEntry.intent,
+      // Whether Drive is now connected. A boolean, never the grant itself: this
+      // object is spread into HTTP responses.
+      driveConnected: Boolean(driveGranted),
       account: {
         googleSub: account.googleSub,
         email: account.email,

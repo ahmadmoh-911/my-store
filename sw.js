@@ -39,10 +39,10 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v17 — Store Hub License Enforcement (entitlement). The licence backend itself
-// lives in /server and is NOT precached (it runs on a server, not in the phone).
-// PRECACHE gains the entitlement module; BUILD must change whenever PRECACHE does.
-const BUILD = 'v17';
+// v18 — Google Drive backup / restore. The licence backend itself lives in
+// /server and is NOT precached (it runs on a server, not in the phone). PRECACHE
+// gains the four backup modules; BUILD must change whenever PRECACHE does.
+const BUILD = 'v18';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -96,6 +96,18 @@ const PRECACHE = [
   './js/license-client.js',
   './js/auth-client.js',
   './js/entitlement.js',
+
+  // Google Drive backup. Precache does NOT mean these run offline — a backup
+  // needs the network by definition. They are here so that an offline launch
+  // can still *import and read* the modules (Settings renders its Drive status
+  // as "not connected" rather than crashing on a missing import), and so that
+  // main.js's dynamic `import()` of the scheduler resolves from cache on a shop
+  // that boots with no signal. An unresolved dynamic import is a thrown
+  // rejection, and a thrown rejection during boot is a blank screen.
+  './js/backup.js',
+  './js/backup-scheduler.js',
+  './js/drive-client.js',
+  './js/drive-auth-client.js',
 
   './vendor/chart.umd.js',
 

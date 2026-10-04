@@ -19,6 +19,8 @@ import { generateLicenseCode } from '../src/codes.js';
 import { openAuthDatabase } from '../src/auth-repository.js';
 import { createAuthService } from '../src/auth-service.js';
 import { createAdminLicenseService } from '../src/admin-service.js';
+import { openDriveDatabase } from '../src/drive-repository.js';
+import { createDriveService } from '../src/drive-service.js';
 
 /**
  * A pepper long enough to satisfy the production length check, fixed so that a
@@ -113,6 +115,7 @@ export function createTestService(options = {}) {
  *   licenseService?: object,
  *   authService?: object,
  *   adminService?: object,
+ *   driveService?: object,
  *   service?: object,
  *   config: object,
  * }} app
@@ -154,6 +157,7 @@ export async function request(app, path, options = {}) {
     licenseService,
     authService,
     adminService: app.adminService,
+    driveService: app.driveService,
     config: app.config,
   });
 
@@ -323,4 +327,108 @@ export async function createTestAdminApp(options = {}) {
       base.close();
     },
   };
+}
+
+/**
+ * Builds a backend with the Drive authorisation plane wired up.
+ *
+ * Three separate in-memory databases, which is the arrangement production uses
+ * too: licences, accounts/sessions, and Drive grants. The tests below assert
+ * that separation rather than trusting it, so building them together here is
+ * what makes those assertions meaningful — a test that used one shared database
+ * would prove nothing.
+ *
+ * @param {{googleSub?: string, connect?: boolean, scopes?: string, env?: Record<string,string>}} [options]
+ */
+export async function createTestDriveApp(options = {}) {
+  const base = createTestService({
+    env: {
+      GOOGLE_CLIENT_ID: 'test-client-id.apps.googleusercontent.com',
+      GOOGLE_CLIENT_SECRET: 'test-client-secret',
+      // Deliberately *not* a `/api/drive/...` path. A test that asserts a plain
+      // sign-in asks for no Drive scope would pass or fail for the wrong reason
+      // if every auth URL carried "drive" in its redirect_uri.
+      GOOGLE_REDIRECT_URI: 'https://storehub.test/api/auth/callback',
+      ...(options.env ?? {}),
+    },
+  });
+
+  const auth = await createTestAuthService(base);
+  const driveDb = await openDriveDatabase(':memory:', {
+    clock: () => base.now(),
+    pepper: base.config.pepper,
+  });
+  const driveService = createDriveService({
+    driveRepository: driveDb.repo,
+    config: base.config,
+    clock: () => base.now(),
+    log: () => {},
+    // Scripted so no test can reach the real Google token endpoint.
+    fetchImpl: options.fetchImpl ?? (async () => {
+      throw new Error('google not reachable in tests');
+    }),
+  });
+
+  // The sink is what the OAuth callback uses to record a grant, exactly as
+  // buildApplication wires it. Driving `connect()` here rather than a full
+  // Google round trip keeps the tests about authorisation, not about Google's
+  // redirect handling.
+  const authWithDrive = createAuthService({
+    authRepository: auth.authRepository,
+    config: base.config,
+    clock: () => base.now(),
+    log: () => {},
+    driveGrantSink: driveService,
+  });
+
+  const googleSub = options.googleSub ?? 'shop-sub-1';
+
+  const app = {
+    ...base,
+    authService: authWithDrive,
+    authRepository: auth.authRepository,
+    authDb: auth.authDb,
+    driveService,
+    driveDb: driveDb.db,
+    driveRepository: driveDb.repo,
+    googleSub,
+
+    /**
+     * Signs a Google account in and returns the session token the Drive guard
+     * reads out of the cookie.
+     */
+    signIn(sub = googleSub, meta = {}) {
+      auth.authRepository.upsertAccount({
+        googleSub: sub,
+        email: meta.email ?? `${sub}@example.test`,
+        displayName: meta.displayName ?? null,
+        avatarUrl: null,
+      });
+      const { sessionToken } = auth.authRepository.createSession(
+        sub,
+        base.config.session.ttlMs,
+        'node-test',
+      );
+      return sessionToken;
+    },
+
+    /** @param {string} [token] @returns {Record<string,string>} */
+    cookieHeaders(token) {
+      return { cookie: `storehub_session=${token}` };
+    },
+
+    /** Records a Drive grant without an OAuth round trip. */
+    connect(refreshToken = 'refresh-token-alpha', sub = googleSub) {
+      return driveService.recordGrant({ googleSub: sub, refreshToken, scopes: options.scopes });
+    },
+
+    close() {
+      driveDb.repo.close();
+      auth.close();
+      base.close();
+    },
+  };
+
+  if (options.connect) app.connect();
+  return app;
 }

@@ -18,8 +18,18 @@ import {
   listProducts, listSales, listSuppliers, listSupplierInvoices, listSupplierPayments, listPurchases,
   DB_NAME, DB_VERSION,
 } from '../db.js';
-import { pageHead, celebrate, toast } from '../components.js';
+import { pageHead, celebrate, toast, confirmDialog } from '../components.js';
 import { navigate } from '../router.js';
+import { getBackupRecord, clearBackupRecord } from '../identity-store.js';
+import { prepareRestore, applyRestore, describeBackup, BACKUP_FOLDER_NAME } from '../backup.js';
+import {
+  BACKUP_INTERVAL_DAYS,
+  BACKUP_STATUS,
+  daysUntilDue,
+  performBackup,
+  fetchPreparedBackup,
+} from '../backup-scheduler.js';
+import { getDriveStatus, getDriveAccessToken, disconnectDrive, connectDriveInPopup } from '../drive-auth-client.js';
 
 export function render() {
   const root = el('div.screen', { id: 'screen-settings' });
@@ -236,6 +246,55 @@ async function boot(host) {
     ])
   );
 
+  /* --- 3b · Google Drive backup ----------------------------------------
+   *
+   * A new group beside the file-based one rather than a new screen, because
+   * this is the same job with a different destination. Everything the shop owner
+   * needs to answer — is it connected, when did it last work, is anything wrong,
+   * how do I get my data back — lives in the same list as the export button they
+   * already know.
+   *
+   * Note the language throughout: "backup", never "sync". Nothing here merges or
+   * pushes, and the copy says so, because a shop owner who thinks their data is
+   * synchronised will make decisions that an offline-first app cannot honour.
+   */
+
+  // Declared before the group is built: these two nodes are handed to `el()` as
+  // children, and a `const` read before its declaration is a ReferenceError, not
+  // an undefined value. They are stable nodes whose children get replaced, so a
+  // repaint never yanks a button out from under a click.
+  const driveStatusLine = el('div.drive-status');
+  const driveActions = el('div.export-row');
+
+  /** The data-layer shape `backup.js` and the scheduler expect. */
+  const dbApi = { exportAll, importAll };
+
+  /** Last known state; `null` until the first read completes. */
+  let drive = null;
+  let driveRecord = null;
+
+  host.appendChild(
+    group('drive', `النسخ الاحتياطي في Google Drive`, 'database', [
+      el(
+        'div.settings-body',
+        {},
+        driveStatusLine,
+        el('p.tiny.muted', {
+          style: 'margin-bottom:12px',
+          text:
+            `تُحفظ نسخة كاملة واحدة في مجلد "${BACKUP_FOLDER_NAME}" داخل حسابك في Google Drive، ` +
+            `ويتم استبدالها مرة كل ${BACKUP_INTERVAL_DAYS} أيام بعد نجاح النسخ السابق فقط. ` +
+            'هذا نسخ احتياطي وليس مزامنة: البيانات تبقى على هذا الجهاز، ولا يغادره شيء سوى ملف النسخة.',
+        }),
+        driveActions,
+        el('p.tiny.muted', {
+          style: 'margin-top:11px',
+          text: 'صور المنتجات وشعار المتجر لا تُضمَّن في النسخة الاحتياطية عن قصد، ولا يمكن استعادتها منها.',
+        }),
+      ),
+    ]),
+  );
+
   /* --- 4 · about ------------------------------------------------------- */
   const wa = (number, label) =>
     el(
@@ -327,6 +386,233 @@ async function boot(host) {
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * Google Drive backup
+   * ------------------------------------------------------------------ */
+
+  /**
+   * Reads the two facts the screen shows and repaints.
+   *
+   * Both reads are local-or-trivial and neither is allowed to throw into the
+   * page: a Settings screen that fails to paint because a backup service is
+   * unreachable would be a worse bug than the one it reports.
+   */
+  async function refreshDrive() {
+    try {
+      driveRecord = await getBackupRecord();
+    } catch {
+      driveRecord = null;
+    }
+    try {
+      drive = await getDriveStatus();
+    } catch {
+      // Treated as "cannot tell" rather than "not connected": an unreachable
+      // backend must not offer a button that will only fail.
+      drive = { connected: false, configured: false, scope: null, folderName: BACKUP_FOLDER_NAME, enabled: true, unknown: true };
+    }
+    paintDrive();
+  }
+
+  /** A human date, or a plain dash when there is nothing to show. */
+  function whenText(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('ar', { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function paintDrive() {
+    clear(driveStatusLine);
+    clear(driveActions);
+
+    if (drive?.unknown) {
+      driveStatusLine.appendChild(
+        el('p.tiny.muted', { text: 'تعذّر قراءة حالة Google Drive — سيُعاد المحاولة عند فتح الإعدادات.' }),
+      );
+      return;
+    }
+
+    if (!drive?.enabled) {
+      driveStatusLine.appendChild(el('p.tiny.muted', { text: 'النسخ الاحتياطي عبر Google Drive معطّل على هذا الخادم.' }));
+      return;
+    }
+
+    const lastSuccess = driveRecord?.lastSuccessAt || null;
+    const due = daysUntilDue(driveRecord, Date.now());
+    const failed = driveRecord?.status === BACKUP_STATUS.ERROR;
+
+    // Connection state first: everything else is conditional on it.
+    driveStatusLine.appendChild(
+      el(
+        'div',
+        { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px' },
+        el('b', { text: drive?.connected ? 'Google Drive متصل' : 'Google Drive غير متصل' }),
+        el('span.tiny.muted', { text: drive?.connected ? `المجلد: ${drive.folderName}` : 'اربط حسابك لتبدأ النسخ الاحتياطي التلقائي.' }),
+      ),
+    );
+
+    if (drive?.connected) {
+      const nextLine =
+        lastSuccess === null
+          ? 'لم تُنجَز نسخة احتياطية بعد — ستُجرى عند أول تشغيل بعد الربط.'
+          : due === 0
+            ? 'نسخة احتياطية مستحقة الآن.'
+            : `النسخة الاحتياطية التالية بعد ${due} يوم.`;
+      driveStatusLine.appendChild(
+        el('p.tiny.muted', { style: 'margin:0 0 4px', text: `آخر نسخة ناجحة: ${whenText(lastSuccess)}` }),
+      );
+      driveStatusLine.appendChild(el('p.tiny.muted', { style: 'margin:0 0 4px', text: nextLine }));
+    }
+
+    // A failure is the one thing worth making loud. A quiet launch in a shop
+    // with no signal is normal; a backup that has been failing for three weeks
+    // is not, and silence here would hide it indefinitely.
+    if (failed && driveRecord?.lastError) {
+      driveStatusLine.appendChild(
+        el(
+          'div.drive-status__error',
+          {},
+          el('b', { text: 'فشلت آخر محاولة نسخ احتياطي' }),
+          el('p.tiny', { style: 'margin:4px 0 0', text: String(driveRecord.lastError).slice(0, 200) }),
+          el('p.tiny.muted', { style: 'margin:4px 0 0', text: 'بياناتك المحلية لم تتأثر، والنسخة السابقة في Drive لم تُحذف. ستُعاد المحاولة تلقائياً.' }),
+        ),
+      );
+    }
+
+    if (drive?.connected) {
+      driveActions.appendChild(
+        el('button.btn.btn--primary', { type: 'button', onClick: (e) => doDriveBackup(e.currentTarget) },
+          fromHTML(icon('upload')), el('span', { text: 'نسخ احتياطي الآن' })),
+      );
+      driveActions.appendChild(
+        el('button.btn.btn--soft', { type: 'button', onClick: (e) => doDriveRestore(e.currentTarget) },
+          fromHTML(icon('download')), el('span', { text: 'استعادة من Google Drive' })),
+      );
+      driveActions.appendChild(
+        el('button.btn.btn--ghost', { type: 'button', onClick: (e) => doDriveDisconnect(e.currentTarget) },
+          el('span', { text: 'فصل Google Drive' })),
+      );
+    } else {
+      driveActions.appendChild(
+        el('button.btn.btn--primary', { type: 'button', onClick: (e) => doDriveConnect(e.currentTarget) },
+          fromHTML(icon('save')), el('span', { text: 'ربط Google Drive' })),
+      );
+    }
+  }
+
+  /** Wraps a button click so it shows a spinner and cannot be double-fired. */
+  async function busy(btn, label, fn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `${fromHTML(icon('spinner'))}<span>${label}</span>`;
+    }
+    try {
+      await fn();
+    } catch (err) {
+      console.error(err);
+      toast(err?.message || 'تعذّر إتمام العملية', 'err');
+    } finally {
+      await refreshDrive();
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function doDriveConnect(btn) {
+    await busy(btn, 'جارٍ الربط…', async () => {
+      let connected = false;
+      try {
+        connected = await connectDriveInPopup();
+      } catch (err) {
+        toast(err?.message || 'تعذّر ربط Google Drive', 'err');
+      }
+      // Re-read the real state rather than trusting the popup's message: the
+      // backend is the only thing that knows whether a grant exists.
+      const status = await getDriveStatus().catch(() => null);
+      if (status?.connected) {
+        toast('تم ربط Google Drive', 'ok');
+      } else if (connected) {
+        toast('تم الربط', 'ok');
+      }
+    });
+  }
+
+  async function doDriveDisconnect(btn) {
+    const yes = await confirmDialog({
+      title: 'فصل Google Drive؟',
+      message: 'سيتوقف Store Hub عن إنشاء النسخ الاحتياطية. النسخة الموجودة في مجلدك لن تُحذف.',
+      confirmLabel: 'فصل',
+    });
+    if (!yes) return;
+    await busy(btn, 'جارٍ الفصل…', async () => {
+      const { wasConnected } = await disconnectDrive();
+      // Only the local bookkeeping is cleared. The customer's file in Drive is
+      // untouched — forgetting when we last backed up must never look like
+      // permission to remove their backup.
+      await clearBackupRecord();
+      toast(wasConnected ? 'تم فصل Google Drive' : 'لم يكن Google Drive متصلاً', 'ok');
+    });
+  }
+
+  async function doDriveBackup(btn) {
+    await busy(btn, 'جارٍ النسخ…', async () => {
+      const { accessToken } = await getDriveAccessToken();
+      const result = await performBackup({ db: dbApi, accessToken });
+      await (await import('../identity-store.js')).saveBackupRecord({
+        status: BACKUP_STATUS.OK,
+        lastSuccessAt: result.createdAt,
+        lastAttemptAt: new Date().toISOString(),
+        lastError: null,
+        folderId: result.folderId,
+        fileId: result.fileId,
+        bytes: result.bytes,
+        counts: result.counts,
+      });
+      toast('تم إنشاء النسخة الاحتياطية', 'ok');
+    });
+  }
+
+  async function doDriveRestore(btn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `${fromHTML(icon('spinner'))}<span>جارٍ التحقق…</span>`;
+    }
+    try {
+      const { accessToken } = await getDriveAccessToken();
+      const fetched = await fetchPreparedBackup({ accessToken });
+      if (!fetched.ok) {
+        toast(fetched.message || 'لا توجد نسخة احتياطية صالحة', 'err');
+        return;
+      }
+
+      const summary = describeBackup(fetched.prepared);
+      const created = whenText(fetched.prepared.createdAt);
+
+      // Explicit confirmation, and it names what is about to be destroyed.
+      // Restore is never automatic — §9, and the only real defence against a
+      // restore nobody asked for.
+      const yes = await confirmDialog({
+        title: 'استعادة من Google Drive؟',
+        message:
+          `النسخة المؤرخة ${created} تحتوي على ${summary.products} منتج · ${summary.sales} فاتورة بيع · ` +
+          `${summary.suppliers} مورد · ${summary.supplierInvoices} فاتورة شراء. ` +
+          'سيُستبدل المحتوى الحالي بالكامل ولا يمكن التراجع.',
+        confirmLabel: 'استعادة',
+      });
+      if (!yes) return;
+
+      await applyRestore(dbApi, fetched.prepared);
+      await celebrate({ title: 'تمت الاستعادة', sub: `${summary.products} منتج · ${summary.sales} فاتورة`, ms: 1300 });
+      navigate('dashboard');
+      setTimeout(() => location.reload(), 400);
+    } catch (err) {
+      console.error(err);
+      toast(err?.message || 'تعذّرت الاستعادة', 'err');
+    } finally {
+      await refreshDrive();
+      if (btn) btn.disabled = false;
+    }
+  }
+
   async function doImport(btn) {
     if (btn) btn.disabled = true;
     const originalText = btn ? btn.innerHTML : '';
@@ -347,15 +633,22 @@ async function boot(host) {
       if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
       return toast('الملف ليس JSON صالحاً', 'err');
     }
-    if (!data || data.app !== 'saher') {
+
+    // One validator for both restore paths. The Drive restore and this file
+    // import now agree by construction about what a valid backup is, because
+    // they are literally the same function — which is the point of §9's
+    // "reuse rather than duplicate". It also accepts the older bare
+    // `exportAll()` files this button has always produced.
+    const prepared = prepareRestore(data);
+    if (!prepared.ok) {
       if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
-      return toast('ملف النسخة الاحتياطية غير صالح', 'err');
+      return toast(prepared.message || 'ملف النسخة الاحتياطية غير صالح', 'err');
     }
 
-    const nP = (data.products || []).length;
-    const nS = (data.sales || []).length;
-    const nU = (data.suppliers || []).length;
-    const nI = (data.supplierInvoices || []).length;
+    const nP = prepared.counts.products;
+    const nS = prepared.counts.sales;
+    const nU = prepared.counts.suppliers;
+    const nI = prepared.counts.supplierInvoices;
 
     const yes = await confirmDialog({
       title: 'استعادة النسخة؟',
@@ -368,7 +661,7 @@ async function boot(host) {
     }
 
     try {
-      await importAll(data);
+      await applyRestore(dbApi, prepared);
       await celebrate({ title: 'تمت الاستعادة', sub: `${nP} منتج · ${nS} فاتورة`, ms: 1300 });
       navigate('dashboard');
       setTimeout(() => location.reload(), 400);
@@ -387,6 +680,12 @@ async function boot(host) {
      deleted outright, with nothing in its place. Wiping a shop is no longer
      one careless tap away from the settings screen; the backup file is the
      only thing that moves data, and it only ever moves it somewhere safe. */
+
+  // Drive state is read last and deliberately not awaited: the screen is
+  // already usable, and the two facts it adds — connected, last backup — should
+  // appear when they arrive rather than hold the whole page for a network call
+  // that may be to an unreachable server.
+  refreshDrive();
 }
 
 /* ------------------------------------------------------------------ *

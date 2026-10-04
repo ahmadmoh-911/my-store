@@ -12,8 +12,10 @@ import { dirname } from 'node:path';
 import { loadConfig } from './config.js';
 import { openLicenseDatabase } from './sqlite.js';
 import { openAuthDatabase } from './auth-repository.js';
+import { openDriveDatabase } from './drive-repository.js';
 import { createLicenseService } from './service.js';
 import { createAuthService } from './auth-service.js';
+import { createDriveService } from './drive-service.js';
 import { createAdminLicenseService } from './admin-service.js';
 import { describeAdminConfiguration } from './admin-authorization.js';
 import { createLicenseServer } from './http.js';
@@ -67,11 +69,37 @@ export async function buildApplication(options = {}) {
     clock,
     pepper: config.pepper,
   });
+
+  // The Drive grant gets its own database, always. `drive.db` is a *different
+  // file* from `databaseFile`, because it holds a long-lived credential and the
+  // licence file holds none — see ./drive-repository.js for why those must not
+  // share a file.
+  if (!config.useMemoryDb && config.drive.databaseFile !== ':memory:') {
+    mkdirSync(dirname(config.drive.databaseFile), { recursive: true });
+  }
+  const driveDb = await openDriveDatabase(config.drive.databaseFile, {
+    clock,
+    pepper: config.pepper,
+  });
+
+  // Drive first: the auth service needs the grant sink in order to record a
+  // Drive grant, and the sink is the drive service. Injected as a plain function
+  // rather than importing the service into auth-service.js, which keeps the
+  // OAuth flow unaware that a Drive store exists and keeps the refresh token on
+  // a path from the token exchange straight into encrypted storage.
+  const driveService = createDriveService({
+    driveRepository: driveDb.repo,
+    config,
+    clock,
+    log,
+  });
+
   const authService = createAuthService({
     authRepository: authDb.repo,
     config,
     clock,
     log,
+    driveGrantSink: driveService,
   });
 
   const adminService = createAdminLicenseService({
@@ -86,8 +114,16 @@ export async function buildApplication(options = {}) {
     licenseService,
     authService,
     adminService,
+    driveService,
+    // The repositories are returned alongside the services so a test can mint a
+    // real session or read a real grant without this module growing a
+    // test-only endpoint. They are wiring, and this function is wiring.
+    authRepository: authDb.repo,
+    driveRepository: driveDb.repo,
+    licenseRepository,
     log,
     close() {
+      driveDb.repo.close();
       authDb.repo.close();
       licenseRepository.close();
     },
@@ -106,13 +142,15 @@ function safeJson(value) {
 
 /** Starts the server when invoked directly. @returns {Promise<void>} */
 async function main() {
-  const { licenseService, authService, adminService, config, log, close } = await buildApplication();
+  const { licenseService, authService, adminService, driveService, config, log, close } =
+    await buildApplication();
 
-  const { listen } = createLicenseServer({ licenseService, authService, adminService, config, log });
+  const { listen } = createLicenseServer({ licenseService, authService, adminService, driveService, config, log });
   const address = await listen();
 
   log(`storehub licence backend listening on http://${address.host}:${address.port}`);
   log(`database ${config.databaseFile}`);
+  log(`drive grants ${config.drive.databaseFile} → "${config.drive.folderName}" in the customer's own Drive`);
   log(describeAdminConfiguration(config.admin));
 
   if (config.env !== 'production') {

@@ -165,6 +165,44 @@ export function loadConfig(env = process.env) {
      * time a genuine admin cannot sign in.
      */
     admin: readAdminConfig(env, nodeEnv),
+
+    /**
+     * Google Drive backup authorisation.
+     *
+     * The backend's role here is authorisation infrastructure and nothing else:
+     * it brokers the Google grant so the device can hold a short-lived access
+     * token instead of a permanent one, and it never receives the backup.
+     *
+     * `databaseFile` is a *separate* database from `databaseFile` above, on
+     * purpose. The Drive grant is a long-lived credential, so it is kept apart
+     * from licence and account tables — a dump of one cannot yield the other,
+     * and the grant can be rotated or revoked without touching shop records.
+     *
+     * `enabled` is opt-out rather than opt-in so that turning backups on never
+     * requires a redeploy — but the grant still has to be granted by the account
+     * itself before anything happens, so enabling this grants nobody anything.
+     */
+    drive: readDriveConfig(env, memory),
+  };
+}
+
+/**
+ * Reads the Drive backup block.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{enabled: boolean, databaseFile: string, folderName: string}}
+ */
+function readDriveConfig(env, memory) {
+  const folderName = (env.STOREHUB_DRIVE_FOLDER || '').trim() || 'Store Hub Backups';
+  return {
+    enabled: env.STOREHUB_DRIVE !== '0' && env.STOREHUB_DRIVE !== 'false',
+    // `STOREHUB_DB=':memory:'` means *every* database is in memory, not just the
+    // licence one. Honouring it here is what keeps a test run from quietly
+    // creating a real `storehub_drive.db` file next to the test output — a test
+    // that writes a durable credential store is a test that leaves secrets
+    // behind on the developer's disk.
+    databaseFile: env.STOREHUB_DRIVE_DB || (memory ? ':memory:' : './data/storehub_drive.db'),
+    folderName,
   };
 }
 

@@ -72,6 +72,48 @@ const MAX_BODY_BYTES = 16 * 1024;
  *
  * Patterns use `:name` for one path segment; anything else must match literally.
  */
+/**
+ * The page Google's redirect lands on at the end of Drive consent.
+ *
+ * A popup opened by Settings navigates here; the page hands the outcome back to
+ * the app window and closes. Two properties this is chosen for:
+ *
+ *   - it needs no configured app URL, because nothing is read from the request.
+ *     An earlier draft redirected to a URL taken from a query parameter, which
+ *     is an open redirect with an OAuth code attached to it;
+ *   - it is a fixed string. The only interpolated value is a boolean this server
+ *     computed, so there is no path by which anything from Google, from the
+ *     request, or from the account reaches this HTML.
+ *
+ * @param {boolean} connected
+ * @returns {string}
+ */
+function driveConsentPage(connected) {
+  const payload = JSON.stringify({ source: 'storehub-drive', connected: connected === true });
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<meta charset="utf-8">
+<title>Google Drive</title>
+<style>
+  body { font: 16px system-ui, sans-serif; margin: 0; display: grid; place-items: center;
+         min-height: 100vh; background: #f6f4f2; color: #26211c; }
+  main { text-align: center; padding: 24px; max-width: 22rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 8px; }
+  p { margin: 0; color: #6b625a; font-size: .9rem; }
+</style>
+<main>
+  <h1>تم ربط Google Drive</h1>
+  <p>يمكنك إغلاق هذه النافذة والعودة إلى الإعدادات.</p>
+</main>
+<script>
+  try {
+    if (window.opener) window.opener.postMessage(${payload}, window.location.origin);
+    setTimeout(function () { window.close(); }, 400);
+  } catch (e) { /* the message is best-effort; the app re-reads status anyway */ }
+</script>
+</html>`;
+}
+
 const ROUTES = Object.freeze([
   // ---- customer licence plane ------------------------------------------
   { method: 'POST', path: '/api/license/activate', handler: 'activate' },
@@ -101,6 +143,16 @@ const ROUTES = Object.freeze([
   { method: 'POST', path: '/api/admin/licenses/:id/revoke', handler: 'adminRevokeLicense', admin: true },
   { method: 'POST', path: '/api/admin/licenses/:id/note', handler: 'adminSetLicenseNote', admin: true },
   { method: 'GET', path: '/api/admin/licenses/:id/events', handler: 'adminListLicenseEvents', admin: true },
+
+  // ---- customer Drive backup plane --------------------------------------
+  // Every route requires a live customer session (`session: true`). None of them
+  // accepts a request body: the backup payload never travels through this
+  // server, and a route that refuses bodies cannot be made to store one.
+  { method: 'GET', path: '/api/drive/status', handler: 'driveStatus', session: true },
+  { method: 'GET', path: '/api/drive/token', handler: 'driveToken', session: true },
+  { method: 'GET', path: '/api/drive/connect/start', handler: 'driveConnectStart', session: true },
+  { method: 'GET', path: '/api/drive/connect/callback', handler: 'driveConnectCallback', session: true },
+  { method: 'POST', path: '/api/drive/disconnect', handler: 'driveDisconnect', session: true },
 ]);
 
 /**
@@ -347,6 +399,7 @@ function clientIp(req, trustProxy) {
  *   licenseService?: ReturnType<typeof import('./service.js').createLicenseService>,
  *   authService?: ReturnType<typeof import('./auth-service.js').createAuthService>,
  *   service?: ReturnType<typeof import('./service.js').createLicenseService>, // deprecated
+ *   driveService?: ReturnType<typeof import('./drive-service.js').createDriveService>,
  *   config: ReturnType<typeof import('./config.js').loadConfig>,
  *   log?: (message: string, detail?: unknown) => void,
  * }} deps
@@ -357,6 +410,7 @@ export function createRequestHandler(deps) {
   const licenseService = deps.licenseService ?? deps.service;
   const authService = deps.authService;
   const adminService = deps.adminService;
+  const driveService = deps.driveService;
   const config = deps.config;
   const log = deps.log || (() => {});
   const limiter = createRateLimiter({
@@ -486,6 +540,23 @@ export function createRequestHandler(deps) {
         }
         throw err;
       }
+    }
+
+    // Customer-session guard for the Drive plane. Same placement and the same
+    // reason as the admin guard above: identity is resolved from the session
+    // cookie before any handler runs, never from anything the caller sent.
+    let session = null;
+    if (route.session) {
+      const token = extractSessionToken(req);
+      const me = token && typeof authService?.getMe === 'function' ? authService.getMe(token) : null;
+      if (!me) {
+        // No usable session: clear the cookie so a stale one does not keep
+        // producing 401s the app cannot recover from by retrying.
+        if (token) clearSessionCookie(res, config);
+        send(res, 401, errorBody(ERROR_CODES.INVALID_SESSION, now), cors);
+        return;
+      }
+      session = { token, account: me.account };
     }
 
     try {
@@ -720,6 +791,133 @@ export function createRequestHandler(deps) {
         return;
       }
 
+      // ---- Drive backup authorisation plane -------------------------------
+      //
+      // Past the `session: true` guard, so `session.account` is a real account.
+      //
+      // Note what is *not* here: no branch reads a request body. The backup
+      // payload is uploaded by the browser straight to googleapis.com and this
+      // server is never on that path. Refusing to parse a body is stronger than
+      // promising not to store one — there is no code path here that could.
+      if (route.handler.startsWith('drive')) {
+        if (!driveService) {
+          throw new LicenseError(ERROR_CODES.INTERNAL_ERROR, {
+            detail: 'driveService is not wired',
+          });
+        }
+        const googleSub = session.account.googleSub;
+
+        if (route.handler === 'driveStatus') {
+          const state = driveService.describe(googleSub);
+          send(res, 200, {
+            ok: true,
+            ...state,
+            // The folder name is echoed so Settings renders exactly what the
+            // server will create. It is a constant, never caller-supplied.
+            folderName: config.drive.folderName,
+            enabled: config.drive.enabled,
+            serverTime: now,
+          }, cors);
+          return;
+        }
+
+        if (route.handler === 'driveToken') {
+          const token = await driveService.getAccessToken(googleSub);
+          // The one and only credential this server hands out. It is scoped to
+          // `drive.file`, addressed to this account, and useless after an hour.
+          send(res, 200, {
+            ok: true,
+            accessToken: token.accessToken,
+            expiresAt: token.expiresAt,
+            scope: token.scope,
+            serverTime: now,
+          }, cors);
+          return;
+        }
+
+        if (route.handler === 'driveConnectStart') {
+          // Reuses the one Google OAuth flow the app already has. The `drive`
+          // intent records that this consent is for backups, so the callback can
+          // only be completed where it was started.
+          const start = authService.startAuth({ intent: 'drive' });
+          send(res, 200, { ok: true, authUrl: start.authUrl, serverTime: now }, cors);
+          return;
+        }
+
+        if (route.handler === 'driveConnectCallback') {
+          const code = readQueryParam(query, 'code');
+          const state_ = readQueryParam(query, 'state');
+          if (!code || !state_) {
+            throw new LicenseError(ERROR_CODES.INVALID_REQUEST, {
+              detail: 'code and state are required',
+            });
+          }
+
+          let completed;
+          try {
+            // Awaited, and deliberately inside the try: `completeAuth` is async, so
+            // without the await this would read `intent` off a Promise (always
+            // undefined), refuse every real consent, and leave the failure as an
+            // unhandled rejection that never reaches this response.
+            completed = await authService.completeAuth({
+              code,
+              state: state_,
+              userAgent: req.headers['user-agent'],
+            });
+          } catch (err) {
+            // A flow that did not start here — a customer sign-in or an admin
+            // sign-in replayed at this URL — must not be honoured.
+            if (isLicenseError(err)) throw err;
+            throw new LicenseError(ERROR_CODES.INVALID_REQUEST, {
+              detail: 'the Google consent could not be completed',
+            });
+          }
+
+          if (completed.intent !== 'drive') {
+            throw new LicenseError(ERROR_CODES.INVALID_REQUEST, {
+              status: 400,
+              detail: `this consent was started for '${completed.intent}', not for Drive`,
+            });
+          }
+
+          if (!completed.driveConnected) {
+            throw new LicenseError(ERROR_CODES.DRIVE_NOT_CONNECTED, {
+              status: 409,
+              detail: 'Google did not return a Drive refresh token; consent may have been skipped',
+            });
+          }
+
+          // The popup that navigated here belongs to the app on this same
+          // origin, so the session cookie is set here and the result is handed
+          // back by postMessage. No return URL is read from the request — that
+          // is what would turn this into an open redirect — and none needs to be
+          // configured, which is why there is no production URL to invent.
+          setSessionCookie(res, completed.sessionToken, config);
+          res.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store',
+            ...cors,
+          });
+          res.end(driveConsentPage(completed.driveConnected));
+          return;
+        }
+
+        if (route.handler === 'driveDisconnect') {
+          const wasConnected = driveService.disconnect(googleSub);
+          send(res, 200, {
+            ok: true,
+            connected: false,
+            wasConnected,
+            serverTime: now,
+          }, cors);
+          return;
+        }
+
+        throw new LicenseError(ERROR_CODES.INTERNAL_ERROR, {
+          detail: `unknown drive handler ${route.handler}`,
+        });
+      }
+
       // Should not reach here
       send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
     } catch (err) {
@@ -740,8 +938,8 @@ export function createRequestHandler(deps) {
  * @param {{licenseService: object, authService: object, adminService: object, config: object, log?: Function}} deps
  * @returns {{server: import('node:http').Server, listen: (port?: number, host?: string) => Promise<{port: number, host: string}>}}
  */
-export function createLicenseServer({ licenseService, authService, adminService, config, log = () => {} }) {
-  const handle = createRequestHandler({ licenseService, authService, adminService, config, log });
+export function createLicenseServer({ licenseService, authService, adminService, driveService, config, log = () => {} }) {
+  const handle = createRequestHandler({ licenseService, authService, adminService, driveService, config, log });
   const server = createHttpServer((req, res) => {
     // A handler that throws asynchronously would otherwise take the process
     // down; handle() already converts errors to responses.

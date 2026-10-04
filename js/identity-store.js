@@ -22,10 +22,12 @@
  * ─────────────────────────────────────────────────────────────────────────
  *   - Store data. Products, sales, invoices, suppliers, reports, settings.
  *     Those live in `saher_db` and never travel to a licence backend.
- *   - Google's access token or refresh token. There is no Google sign-in yet.
- *     When there is, the plan is to exchange the Google ID token for a
- *     backend-issued session, so no long-lived Google secret is parked here.
- *     This module deliberately has no field for one.
+ *   - Google's access token or refresh token, now or later. The Google Drive
+ *     grant introduced by the backup phase is the concrete case: it is a
+ *     long-lived credential, so it is brokered by the backend (which holds the
+ *     client secret this app may not have) and the device only ever holds a
+ *     short-lived access token, in memory, for the length of one backup.
+ *     This module deliberately has no field for either.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * What a record here does NOT mean
@@ -41,7 +43,7 @@
 export const IDENTITY_DB_NAME = 'storehub_identity';
 
 /** Schema version. Bump only when the shape below actually changes. */
-export const IDENTITY_DB_VERSION = 1;
+export const IDENTITY_DB_VERSION = 2;
 
 /**
  * Object stores. Each holds exactly one record, keyed by a fixed `key`, so
@@ -58,6 +60,19 @@ export const IDENTITY_STORES = Object.freeze({
   license: 'license',
   /** Auth session: backend-issued session token and expiry. */
   authSession: 'authSession',
+  /**
+   * Google Drive backup bookkeeping: when a backup last succeeded, which Drive
+   * file it went to, and the last failure.
+   *
+   * Deliberately here rather than in `saher_db`, and that is the whole design:
+   * `exportAll()` reads `saher_db`, so a backup can never sweep up its own
+   * bookkeeping, and wiping the shop does not invent a fake "last backup" date.
+   *
+   * It holds no business records and, like every other store here, no Google
+   * access or refresh token — the Drive grant lives on the backend, which is
+   * the only place a long-lived credential may be kept.
+   */
+  backup: 'backup',
 });
 
 const RECORD_KEY = 'current';
@@ -426,22 +441,96 @@ export async function hasValidAuthSession() {
   return true;
 }
 
+/* ------------------------------------------------------------------ *
+ * Google Drive backup bookkeeping (NOT the backup itself)
+ * ------------------------------------------------------------------ */
+
+/**
+ * @typedef {object} BackupRecord
+ * @property {string|null}   lastSuccessAt   ISO time of the last *successful* backup
+ * @property {string|null}   lastAttemptAt   ISO time of the last attempt, whatever its outcome
+ * @property {string}        status          'never' | 'ok' | 'error' | 'running'
+ * @property {string|null}   lastError       short, safe description of the last failure
+ * @property {string|null}   folderId        Drive folder id of 'Store Hub Backups'
+ * @property {string|null}   fileId          Drive file id of the current backup
+ * @property {number|null}   bytes           size of the last successful backup
+ * @property {number|null}   formatVersion   BACKUP_VERSION of that file
+ * @property {object|null}   counts          record counts in that file, for display
+ */
+
+/**
+ * @returns {Promise<BackupRecord|null>}
+ */
+export function getBackupRecord() {
+  return readRecord(IDENTITY_STORES.backup);
+}
+
+/**
+ * Records the outcome of a backup attempt.
+ *
+ * `lastSuccessAt` is only ever advanced by a *confirmed* upload — the caller
+ * gets here after Drive has verified the file. That is what makes the weekly
+ * schedule honest: a run that fails on a train leaves the previous date alone,
+ * so the next eligible launch tries again instead of waiting another seven
+ * days.
+ *
+ * There is no token field, and one must not be added. The Drive grant is a
+ * backend-held secret; a token in a device-local database is exactly the thing
+ * §12 of the backup phase rules out.
+ *
+ * @param {Partial<BackupRecord>} patch
+ * @returns {Promise<BackupRecord>}
+ */
+export async function saveBackupRecord(patch = {}) {
+  const existing = (await getBackupRecord()) || {};
+  return writeRecord(IDENTITY_STORES.backup, {
+    ...existing,
+    lastSuccessAt: patch.lastSuccessAt ?? existing.lastSuccessAt ?? null,
+    lastAttemptAt: patch.lastAttemptAt ?? existing.lastAttemptAt ?? null,
+    status: patch.status ?? existing.status ?? 'never',
+    lastError: patch.lastError ?? existing.lastError ?? null,
+    folderId: patch.folderId ?? existing.folderId ?? null,
+    fileId: patch.fileId ?? existing.fileId ?? null,
+    bytes: patch.bytes ?? existing.bytes ?? null,
+    formatVersion: patch.formatVersion ?? existing.formatVersion ?? null,
+    counts: patch.counts ?? existing.counts ?? null,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Forgets backup bookkeeping. The Drive backup itself is untouched — clearing
+ * this only means the app stops knowing when it last ran, never that the
+ * customer's backup should disappear.
+ *
+ * @returns {Promise<void>}
+ */
+export function clearBackupRecord() {
+  return deleteRecord(IDENTITY_STORES.backup);
+}
+
 /**
  * Everything in the identity database, in one round trip.
  *
- * A fresh database returns `{ device: null, account: null, license: null, authSession: null }` —
- * the same shape as a populated one, so a caller never has to distinguish
- * "nothing stored yet" from "missing key".
+ * A fresh database returns every key as `null` — the same shape as a populated
+ * one, so a caller never has to distinguish "nothing stored yet" from "missing
+ * key".
  *
- * @returns {Promise<{device: object|null, account: object|null, license: object|null, authSession: object|null}>}
+ * @returns {Promise<{device: object|null, account: object|null, license: object|null, authSession: object|null, backup: object|null}>}
  */
 export async function readIdentitySummary() {
   const db = await getIdentityDb();
-  const names = [IDENTITY_STORES.device, IDENTITY_STORES.account, IDENTITY_STORES.license, IDENTITY_STORES.authSession];
+  const names = [
+    IDENTITY_STORES.device,
+    IDENTITY_STORES.account,
+    IDENTITY_STORES.license,
+    IDENTITY_STORES.authSession,
+    IDENTITY_STORES.backup,
+  ];
   const tx = db.transaction(names, 'readonly');
   const found = await Promise.all(names.map((n) => fromRequest(tx.objectStore(n).get(RECORD_KEY))));
-  const [device, account, license, authSession] = found.map((v) => (v === undefined ? null : v));
-  return { device, account, license, authSession };
+  const [device, account, license, authSession, backup] = found.map((v) => (v === undefined ? null : v));
+  return { device, account, license, authSession, backup };
 }
 
 /**

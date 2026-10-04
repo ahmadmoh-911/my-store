@@ -34,6 +34,16 @@ export const ERROR_CODES = Object.freeze({
    * through a pointless login loop.
    */
   ADMIN_REQUIRED: 'ADMIN_REQUIRED',
+  /**
+   * The Google Drive grant is missing, expired, or was refused by Google.
+   *
+   * Separate from `INVALID_SESSION` because the remedy is different: the caller's
+   * Store Hub session is perfectly valid, the account simply has not connected
+   * Drive, or Google has withdrawn the grant and the user must re-consent.
+   * Reporting it as a session problem would send Settings into a re-login loop
+   * that can never fix it.
+   */
+  DRIVE_NOT_CONNECTED: 'DRIVE_NOT_CONNECTED',
   /** Catch-all for unexpected server faults; details go to the log, not out. */
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 });
@@ -50,6 +60,7 @@ const MESSAGES = Object.freeze({
   [ERROR_CODES.ACCOUNT_MISMATCH]: 'This licence belongs to a different account.',
   [ERROR_CODES.INVALID_SESSION]: 'The session token is missing, unknown, or revoked.',
   [ERROR_CODES.ADMIN_REQUIRED]: 'Administrator authorisation is required for this operation.',
+  [ERROR_CODES.DRIVE_NOT_CONNECTED]: 'Google Drive is not connected for this account.',
   [ERROR_CODES.INTERNAL_ERROR]: 'The server could not complete the request.',
 });
 
@@ -71,6 +82,7 @@ const STATUSES = Object.freeze({
   [ERROR_CODES.ACCOUNT_MISMATCH]: 403,
   [ERROR_CODES.INVALID_SESSION]: 401,
   [ERROR_CODES.ADMIN_REQUIRED]: 403,
+  [ERROR_CODES.DRIVE_NOT_CONNECTED]: 409,
   [ERROR_CODES.INTERNAL_ERROR]: 500,
 });
 

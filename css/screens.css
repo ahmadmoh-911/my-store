@@ -1493,6 +1493,25 @@
 .settings-group__head h3 { font-size: var(--fs-sm); font-weight: 700; flex: 1; }
 .settings-body { padding: 15px 16px; }
 
+/* --------------------------------------------------------------------------
+   Google Drive backup status
+   --------------------------------------------------------------------------
+   Two blocks, both in the existing design tokens — no new colours. The failure
+   block is tinted with --danger rather than --warning on purpose: a backup that
+   has been failing is a problem to act on, not a note.
+   -------------------------------------------------------------------------- */
+.drive-status { margin-bottom: 12px; }
+
+.drive-status__error {
+  margin-top: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--danger-tint);
+  color: var(--ink);
+}
+.drive-status__error b { color: var(--danger); font-size: var(--fs-sm); }
+
 .setting-row {
   display: flex;
   align-items: center;
