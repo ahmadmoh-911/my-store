@@ -672,99 +672,92 @@ export async function createSale(sale) {
  * product is read once and written once, for the same reason createSale does:
  * per-line get/put pairs make two lines of one product overwrite each other.
  */
-export function updateSale(saleId, patch) {
-  const now = new Date().toISOString();
+export async function updateSale(saleId, patch) {
+  // First, read the old sale record
+  const old = await get(STORES.sales, saleId);
+  if (!old) return null;
 
-  return multiTx([STORES.sales, STORES.products], 'readwrite', (store) => {
-    const salesStore = store(STORES.sales);
-    const productsStore = store(STORES.products);
+  // Compute stock delta per variant
+  const delta = new Map();
+  const bump = (productId, size, color, by) => {
+    if (!by) return;
+    if (!delta.has(productId)) delta.set(productId, new Map());
+    const per = delta.get(productId);
+    const k = size + "|" + color;
+    per.set(k, (per.get(k) || 0) + by);
+  };
 
-    const req = salesStore.get(saleId);
-    req.onsuccess = () => {
-      const old = req.result;
-      if (!old) return;
+  const oldItems = old.items || [];
+  const newItems = (patch.items || old.items || [])
+    .map((it) => ({
+      productId: it.productId,
+      name: it.name,
+      size: it.size,
+      color: it.color,
+      qty: nonNegInt(it.qty),
+      price: nonNeg(it.price),
+      costPrice: nonNeg(it.costPrice),
+    }))
+    .filter((it) => it.qty > 0);
 
-      const items = (patch.items || old.items || [])
-        .map((it) => ({
-          productId: it.productId,
-          name: it.name,
-          size: it.size,
-          color: it.color,
-          qty: nonNegInt(it.qty),
-          price: nonNeg(it.price),
-          costPrice: nonNeg(it.costPrice),
-        }))
-        .filter((it) => it.qty > 0);
+  for (const it of old.items || []) bump(it.productId, it.size, it.color, it.qty);
+  for (const it of newItems) bump(it.productId, it.size, it.color, -it.qty);
 
-      const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
-      const discountType = patch.discountType || old.discountType || 'fixed';
-      const discountValue = nonNeg(patch.discountValue === undefined ? old.discountValue : patch.discountValue);
-      const discount =
-        discountType === 'percent'
-          ? round2((subtotal * Math.min(discountValue, 100)) / 100)
-          : Math.min(round2(discountValue), subtotal);
-      const total = round2(subtotal - discount);
-
-      salesStore.put({
-        ...old,
-        items,
-        subtotal: round2(subtotal),
-        discount,
-        discountType,
-        discountValue,
-        total,
-        costTotal: items.reduce((t, it) => t + it.qty * (it.costPrice || 0), 0),
-        paymentMethod: patch.paymentMethod || old.paymentMethod || 'cash',
-        note: patch.note === undefined ? old.note : patch.note,
-        updatedAt: now,
-      });
-
-      // How many pieces each variant must gain (positive) or lose (negative).
-      // Keyed by product, then by the size+color that identifies the variant.
-      const delta = new Map();
-      const bump = (productId, size, color, by) => {
-        if (!by) return;
-        if (!delta.has(productId)) delta.set(productId, new Map());
-        const per = delta.get(productId);
-        const k = `${size} ${color}`;
-        per.set(k, (per.get(k) || 0) + by);
-      };
-      for (const it of old.items || []) bump(it.productId, it.size, it.color, it.qty);
-      for (const it of items) bump(it.productId, it.size, it.color, -it.qty);
-
-      const ids = [...delta.keys()];
-      if (!ids.length) return;
-
-      let left = ids.length;
-      const flush = () => {
-        if (--left > 0) return;
-        for (const [pid, per] of delta) {
-          const preq = productsStore.get(pid);
-          preq.onsuccess = () => {
-            const p = preq.result;
-            if (!p) return;
-            for (const [k, by] of per) {
-              const [size, color] = k.split(' ');
-              const v = (p.variants || []).find((x) => x.size === size && x.color === color);
-              if (!v) continue;
-              v.quantity = Math.max(0, (Number(v.quantity) || 0) + by);
-            }
-            p.updatedAt = now;
-            productsStore.put(p);
-          };
-        }
-      };
-      for (const pid of ids) {
-        const greq = productsStore.get(pid);
-        greq.onsuccess = flush;
-        greq.onerror = flush;
+  // Apply stock delta to product variants
+  for (const pid of delta.keys()) {
+    const product = await get(STORES.products, pid);
+    if (!product) continue;
+    const per = delta.get(pid);
+    for (const [k, by] of per) {
+      const [size, color] = k.split("|");
+      const v = (product.variants || []).find((x) => x.size === size && x.color === color);
+      if (v) {
+        v.quantity = Math.max(0, (Number(v.quantity) || 0) + by);
       }
-    };
-  });
-}
+    }
+    await put(STORES.products, product);
+  }
 
-/** Undo a sale (used by "استرجاع" from reports) — restores stock. */
-export function refundSale(saleId) {
+  const items = (patch.items || old.items || [])
+    .map((it) => ({
+      productId: it.productId,
+      name: it.name,
+      size: it.size,
+      color: it.color,
+      qty: nonNegInt(it.qty),
+      price: nonNeg(it.price),
+      costPrice: nonNeg(it.costPrice),
+    }))
+    .filter((it) => it.qty > 0);
+
+  const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
+  const discountType = patch.discountType || old.discountType || 'fixed';
+  const discountValue = nonNeg(patch.discountValue === undefined ? old.discountValue : patch.discountValue);
+  const discount =
+    discountType === 'percent'
+      ? round2((subtotal * Math.min(discountValue, 100)) / 100)
+      : Math.min(round2(discountValue), subtotal);
+  const priceIncrease = nonNeg(patch.priceIncrease === undefined ? (old.priceIncrease || 0) : patch.priceIncrease);
+  const total = round2(subtotal - discount + priceIncrease);
+
+  const updatedRecord = {
+    ...old,
+    items,
+    subtotal: round2(subtotal),
+    discount,
+    discountType: patch.discountType || old.discountType || 'fixed',
+    discountValue,
+    priceIncrease,
+    total,
+    costTotal: items.reduce((t, it) => t + it.qty * (it.costPrice || 0), 0),
+    paymentMethod: patch.paymentMethod || old.paymentMethod || 'cash',
+    note: patch.note === undefined ? old.note : patch.note,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await put(STORES.sales, updatedRecord);
+  return updatedRecord;
+}export function refundSale(saleId) {
   return multiTx([STORES.sales, STORES.products], 'readwrite', (store) => {
     const salesStore = store(STORES.sales);
     const productsStore = store(STORES.products);
