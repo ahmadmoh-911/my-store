@@ -8,6 +8,7 @@
 import { ERROR_CODES, LicenseError, errorBody } from './errors.js';
 import { randomBytes, createHash } from 'node:crypto';
 import { DRIVE_SCOPE } from './drive-service.js';
+import { resolveRedirectUri, redirectUriEnvName } from './config.js';
 
 /** Google OAuth endpoints */
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -135,15 +136,24 @@ async function fetchGoogleUserInfo(accessToken) {
 /**
  * Validates that the Google config is complete.
  *
+ * `intent` is the flow that is about to run. When it is given, the redirect URI
+ * checked is that flow's own — the exact value `resolveRedirectUri` will send —
+ * so a missing `GOOGLE_ADMIN_REDIRECT_URI` is reported under its own name rather
+ * than as the shared variable an operator may never have heard of. With no
+ * intent there is no flow to resolve, so only the credentials are checked.
+ *
  * @param {ReturnType<import('./config.js').loadConfig>} config
+ * @param {'customer'|'admin'|'drive'} [intent]
  * @throws {LicenseError} if config is missing in production
  */
-function validateGoogleConfig(config) {
-  const { clientId, clientSecret, redirectUri } = config.google;
+function validateGoogleConfig(config, intent) {
+  const { clientId, clientSecret } = config.google;
   const missing = [];
   if (!clientId) missing.push('GOOGLE_CLIENT_ID');
   if (!clientSecret) missing.push('GOOGLE_CLIENT_SECRET');
-  if (!redirectUri) missing.push('GOOGLE_REDIRECT_URI');
+  if (intent && !resolveRedirectUri(config.google, intent)) {
+    missing.push(redirectUriEnvName(intent));
+  }
 
   if (missing.length > 0) {
     const msg = `Google OAuth not configured: missing ${missing.join(', ')}`;
@@ -201,9 +211,12 @@ export function createAuthService({ authRepository, config, clock, log = () => {
    * @returns {{authUrl: string, state: string, intent: string}}
    */
   function startAuth(options = {}) {
-    validateGoogleConfig(config);
-
+    // Computed first: both the config check below and the authorize request
+    // depend on which flow this is, which is the whole point of keeping a
+    // redirect URI per flow rather than one shared value.
     const intent = options.intent === 'admin' ? 'admin' : options.intent === 'drive' ? 'drive' : 'customer';
+    validateGoogleConfig(config, intent);
+
     // A Drive grant can only be requested from the Drive entry point. Letting
     // `drive: true` ride along on a plain sign-in would quietly widen consent
     // for everyone who logs in, which is the opposite of opt-in.
@@ -213,7 +226,7 @@ export function createAuthService({ authRepository, config, clock, log = () => {
     const state = randomBytes(16).toString('base64url');
     const authUrl = buildGoogleAuthUrl({
       clientId: config.google.clientId,
-      redirectUri: config.google.redirectUri,
+      redirectUri: resolveRedirectUri(config.google, intent),
       state,
       codeChallenge: challenge,
       drive,
@@ -264,12 +277,20 @@ export function createAuthService({ authRepository, config, clock, log = () => {
       });
     }
 
+    // The flow is only known once the state has been looked up, so this is the
+    // earliest point at which the right redirect URI can be resolved. Google
+    // rejects an exchange whose `redirect_uri` differs from the one the code was
+    // issued for, so this must be the same value the authorize request sent —
+    // which it is, because both come from `resolveRedirectUri`.
+    validateGoogleConfig(config, pkceEntry.intent);
+    const redirectUri = resolveRedirectUri(config.google, pkceEntry.intent);
+
     // Exchange code for tokens
     const tokens = await exchangeCodeForTokens({
       code,
       clientId: config.google.clientId,
       clientSecret: config.google.clientSecret,
-      redirectUri: config.google.redirectUri,
+      redirectUri,
       codeVerifier: pkceEntry.verifier,
     });
 

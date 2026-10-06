@@ -1152,10 +1152,21 @@ test('SECURITY: no admin password, secret or hardcoded grant exists in the sourc
 
     // And no module reads an admin credential from anywhere but the one
     // documented allowlist.
+    //
+    // The three GOOGLE_*_REDIRECT_URI variables contain "ADMIN"/"AUTH"/"DRIVE"
+    // in their names but are Google OAuth callback URLs, not admin credentials.
+    // They are config, not secrets. The allowlist below covers them explicitly.
     const adminReads = code.match(/env\.[A-Z_]*ADMIN[A-Z_]*/g) ?? [];
+    const allowedAdminReads = new Set([
+      'env.STOREHUB_ADMIN_SUB',
+      'env.STOREHUB_ADMIN_PORTAL_URL',
+      'env.GOOGLE_ADMIN_REDIRECT_URI',
+      'env.GOOGLE_AUTH_REDIRECT_URI',
+      'env.GOOGLE_DRIVE_REDIRECT_URI',
+    ]);
     for (const read of adminReads) {
       assert.ok(
-        read === 'env.STOREHUB_ADMIN_SUB' || read === 'env.STOREHUB_ADMIN_PORTAL_URL',
+        allowedAdminReads.has(read),
         `${name} reads an undocumented admin variable (${read})`,
       );
     }

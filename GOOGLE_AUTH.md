@@ -58,7 +58,10 @@ This document describes the Google OAuth 2.0 authentication foundation for Store
 |----------|-------------|----------|
 | `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Client ID (Web application type) | Yes (prod) |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret | Yes (prod) |
-| `GOOGLE_REDIRECT_URI` | Full callback URL (must match Google Cloud console) | Yes (prod) |
+| `GOOGLE_AUTH_REDIRECT_URI` | Customer sign-in callback (must match Google Cloud console) | Yes (prod) |
+| `GOOGLE_ADMIN_REDIRECT_URI` | Admin portal callback (must match Google Cloud console) | Yes (prod) |
+| `GOOGLE_DRIVE_REDIRECT_URI` | Drive connect callback (must match Google Cloud console) | Yes (prod) |
+| `GOOGLE_REDIRECT_URI` | **Compatibility fallback** — used in development when per-flow URIs are not set. Must NOT be the only URI in production. | No |
 | `STOREHUB_PEPPER` | Secret for hashing codes/sessions (32+ chars) | Yes (prod) |
 | `STOREHUB_DB` | SQLite database file path | No (default: `./data/storehub.db`) |
 | `STOREHUB_SESSION_TTL_MS` | Session lifetime in ms | No (default: 30 days) |
@@ -80,10 +83,15 @@ This document describes the Google OAuth 2.0 authentication foundation for Store
    NODE_ENV=development
    ```
 
+   > In development the single `GOOGLE_REDIRECT_URI` is accepted as a fallback for all three flows. Production requires all three per-flow variables.
+
 2. **Configure Google Cloud Console:**
    - Go to APIs & Services → Credentials
    - Create or select "Web application" OAuth client
-   - Add `http://localhost:8787/api/auth/google/callback` to **Authorized redirect URIs**
+   - Add **all three** redirect URIs to **Authorized redirect URIs**:
+     - `http://localhost:8787/api/auth/google/callback` (customer sign-in)
+     - `http://localhost:8787/api/admin/auth/callback` (admin portal)
+     - `http://localhost:8787/api/drive/connect/callback` (Drive connect)
    - Add `http://localhost:8787` to **Authorized JavaScript origins** (for CORS)
 
 3. **Start the backend:**
@@ -100,7 +108,10 @@ This document describes the Google OAuth 2.0 authentication foundation for Store
 
 1. **Set all environment variables** on the server (no `.env` file in production).
 2. **Update Google Cloud Console:**
-   - Replace redirect URI with your production backend URL: `https://api.yourdomain.com/api/auth/google/callback`
+   - Register **all three** production redirect URIs for the Web application client:
+     - `https://api.yourdomain.com/api/auth/google/callback` (customer sign-in)
+     - `https://api.yourdomain.com/api/admin/auth/callback` (admin portal)
+     - `https://api.yourdomain.com/api/drive/connect/callback` (Drive connect)
    - Add production frontend origin to authorized JavaScript origins.
 3. **Ensure HTTPS** — Google requires HTTPS for production redirect URIs (localhost is the only HTTP exception).
 4. **Reverse proxy** — If using nginx/Apache, set `STOREHUB_TRUST_PROXY=1` and forward `X-Forwarded-For`.

@@ -9,7 +9,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { loadConfig } from './config.js';
+import { loadConfig, assertProductionRedirectUris } from './config.js';
 import { openLicenseDatabase } from './sqlite.js';
 import { openAuthDatabase } from './auth-repository.js';
 import { openDriveDatabase } from './drive-repository.js';
@@ -38,6 +38,12 @@ import { createLicenseServer } from './http.js';
  */
 export async function buildApplication(options = {}) {
   const config = loadConfig(options.env ?? process.env);
+
+  // Before anything is opened or created, so a production start that would put
+  // every Google flow back on one shared redirect URI fails here with the list
+  // of variables to set, instead of shipping an admin portal and a Drive connect
+  // that can never receive Google's redirect.
+  assertProductionRedirectUris(config);
 
   /** @param {string} message @param {unknown} [detail] */
   const log = (message, detail) => {

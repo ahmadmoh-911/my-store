@@ -197,7 +197,10 @@ deployment's secret store or environment file.
 | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | yes | OAuth client |
 | `GOOGLE_CLIENT_SECRET` | yes | OAuth client secret |
-| `GOOGLE_REDIRECT_URI` | yes | callback URL registered with Google |
+| `GOOGLE_AUTH_REDIRECT_URI` | yes | Customer sign-in callback registered with Google |
+| `GOOGLE_ADMIN_REDIRECT_URI` | yes | Admin portal callback registered with Google |
+| `GOOGLE_DRIVE_REDIRECT_URI` | yes | Drive connect callback registered with Google |
+| `GOOGLE_REDIRECT_URI` | no | **Compatibility fallback** — development only. Must NOT be the only URI in production. |
 | `STOREHUB_PEPPER` | yes (in production) | mixed into every licence hash; never in the database |
 | `STOREHUB_ADMIN_SUB` | yes (in production) | comma-separated Google `sub` values authorised to operate licences |
 | `STOREHUB_ADMIN_PORTAL_URL` | no | where the admin callback returns the browser |
@@ -230,12 +233,21 @@ Adding an administrator is a configuration change and a restart. There is no UI
 for granting admin rights, which is deliberate: an admin panel that can grant
 admin rights needs a different admin panel to guard it.
 
-### The Google redirect URI
+### The Google redirect URIs
 
-`GOOGLE_REDIRECT_URI` is a single value shared by both flows. Register the admin
-callback with Google as an additional redirect URI if you use the admin flow —
-Google accepts more than one — and note that it must match what the backend sends
-exactly.
+**Three separate redirect URIs are now required in production**, one per Google
+flow. The old `GOOGLE_REDIRECT_URI` is a development fallback only.
+
+| Flow | Environment variable | Callback path | Scope added |
+|------|----------------------|---------------|-------------|
+| Customer sign-in | `GOOGLE_AUTH_REDIRECT_URI` | `/api/auth/google/callback` | `openid email profile` |
+| Admin portal | `GOOGLE_ADMIN_REDIRECT_URI` | `/api/admin/auth/callback` | `openid email profile` |
+| Drive connect | `GOOGLE_DRIVE_REDIRECT_URI` | `/api/drive/connect/callback` | `openid email profile https://www.googleapis.com/auth/drive.file` |
+
+Register **all three** with the same Web application client in Google Cloud Console.
+The admin callback will never receive a customer sign-in's code (intent separation
+is enforced server-side), and the Drive callback will reject any state not minted
+by the Drive flow.
 
 ---
 

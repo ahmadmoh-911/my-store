@@ -200,7 +200,9 @@ The following must be set in the server environment before Drive works in produc
 |----------|---------|
 | `GOOGLE_CLIENT_ID` | OAuth client ID from Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | OAuth client secret |
-| `GOOGLE_REDIRECT_URI` | Must be `https://your-domain/api/drive/connect/callback` (exact match, registered for **Web application** and **Android** in Google Cloud) |
+| `GOOGLE_DRIVE_REDIRECT_URI` | **Must be** `https://your-domain/api/drive/connect/callback` (exact match, registered for **Web application** in Google Cloud) |
+| `GOOGLE_AUTH_REDIRECT_URI` | Customer sign-in: `https://your-domain/api/auth/google/callback` |
+| `GOOGLE_ADMIN_REDIRECT_URI` | Admin portal: `https://your-domain/api/admin/auth/callback` |
 | `STOREHUB_PEPPER` | ≥32-byte secret for sealing Drive grants (rotate with care — old grants become unreadable) |
 | `STOREHUB_DRIVE_DB` | Path to the Drive grants database (e.g. `/var/lib/storehub/storehub_drive.db`) |
 | `STOREHUB_DRIVE_FOLDER` | Optional folder name override (default: `Store Hub Backups`) |
@@ -210,7 +212,7 @@ The following must be set in the server environment before Drive works in produc
 - Drive API enabled.
 - OAuth consent screen configured (internal or external).
 - `drive.file` scope added to the consent screen.
-- Redirect URI registered for Web and Android.
+- **All three redirect URIs registered** for the Web application client.
 - Test users added (if external).
 
 ---

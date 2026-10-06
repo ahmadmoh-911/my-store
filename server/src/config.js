@@ -117,15 +117,15 @@ export function loadConfig(env = process.env) {
     /**
      * Google OAuth configuration.
      *
-     * All three are required in production. In development they can be omitted
-     * to allow the server to start without Google credentials, but the auth
-     * endpoints will return configuration errors until they are provided.
+     * `clientId` and `clientSecret` are required in production. In development
+     * they can be omitted to allow the server to start without Google
+     * credentials, but the auth endpoints will return configuration errors until
+     * they are provided.
+     *
+     * The redirect URI is read per flow rather than as one shared value — see
+     * `readGoogleConfig` and `resolveRedirectUri` below.
      */
-    google: {
-      clientId: env.GOOGLE_CLIENT_ID || null,
-      clientSecret: env.GOOGLE_CLIENT_SECRET || null,
-      redirectUri: env.GOOGLE_REDIRECT_URI || null,
-    },
+    google: readGoogleConfig(env),
 
     /**
      * Session configuration.
@@ -184,6 +184,123 @@ export function loadConfig(env = process.env) {
      */
     drive: readDriveConfig(env, memory),
   };
+}
+
+/**
+ * The three Google flows, and the single configuration key each one reads.
+ *
+ * Google is sent exactly one `redirect_uri` per authorize request and redirects
+ * the browser to *that* value, so a flow can only ever land on the callback its
+ * own URI points at. There used to be one `GOOGLE_REDIRECT_URI` shared by all
+ * three, which made `/api/admin/auth/callback` and `/api/drive/connect/callback`
+ * unreachable: an admin sign-in stranded the operator on a JSON response, and a
+ * Drive connect stranded the popup on the same response so the app never got its
+ * `postMessage` and reported a timeout even though the grant had been recorded.
+ *
+ * Each flow now reads its own variable, and only falls back to the shared
+ * `GOOGLE_REDIRECT_URI` outside production so existing development and test
+ * setups keep working unchanged. Production refuses to boot until all three are
+ * set — see `assertProductionRedirectUris`.
+ */
+const REDIRECT_FLOWS = Object.freeze({
+  customer: Object.freeze({
+    field: 'authRedirectUri',
+    env: 'GOOGLE_AUTH_REDIRECT_URI',
+    path: '/api/auth/google/callback',
+  }),
+  admin: Object.freeze({
+    field: 'adminRedirectUri',
+    env: 'GOOGLE_ADMIN_REDIRECT_URI',
+    path: '/api/admin/auth/callback',
+  }),
+  drive: Object.freeze({
+    field: 'driveRedirectUri',
+    env: 'GOOGLE_DRIVE_REDIRECT_URI',
+    path: '/api/drive/connect/callback',
+  }),
+});
+
+/**
+ * Reads the Google block, keeping the shared redirect URI as a fallback value.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {{
+ *   clientId: string|null,
+ *   clientSecret: string|null,
+ *   redirectUri: string|null,
+ *   authRedirectUri: string|null,
+ *   adminRedirectUri: string|null,
+ *   driveRedirectUri: string|null,
+ * }}
+ */
+function readGoogleConfig(env) {
+  return {
+    clientId: env.GOOGLE_CLIENT_ID || null,
+    clientSecret: env.GOOGLE_CLIENT_SECRET || null,
+    // Kept for compatibility only. It is never authoritative in production: it
+    // is the shared value this change exists to get away from.
+    redirectUri: env.GOOGLE_REDIRECT_URI || null,
+    authRedirectUri: env.GOOGLE_AUTH_REDIRECT_URI || null,
+    adminRedirectUri: env.GOOGLE_ADMIN_REDIRECT_URI || null,
+    driveRedirectUri: env.GOOGLE_DRIVE_REDIRECT_URI || null,
+  };
+}
+
+/**
+ * The redirect URI one flow must use, in both the authorize request and the code
+ * exchange that follows it — Google rejects an exchange whose `redirect_uri`
+ * differs from the one the code was issued for, so these two must agree and they
+ * agree by coming from this one function.
+ *
+ * The flow's own variable wins; the shared `GOOGLE_REDIRECT_URI` is the
+ * compatibility fallback; `null` means the flow is not configured.
+ *
+ * @param {ReturnType<typeof readGoogleConfig>} google
+ * @param {'customer'|'admin'|'drive'} intent
+ * @returns {string|null}
+ */
+export function resolveRedirectUri(google, intent) {
+  const flow = REDIRECT_FLOWS[intent] || REDIRECT_FLOWS.customer;
+  return google[flow.field] || google.redirectUri || null;
+}
+
+/**
+ * The environment variable a flow reads, for an error message that names the
+ * variable the operator actually has to set.
+ *
+ * @param {'customer'|'admin'|'drive'} intent
+ * @returns {string}
+ */
+export function redirectUriEnvName(intent) {
+  return (REDIRECT_FLOWS[intent] || REDIRECT_FLOWS.customer).env;
+}
+
+/**
+ * Refuses a production start that would put all three flows back on one shared
+ * redirect URI.
+ *
+ * Deliberately *not* called from `loadConfig`: configuration is read there and
+ * nothing is validated beyond what is needed to build the object, so a caller
+ * that only wants to inspect config is not forced to satisfy a deployment rule.
+ * `./index.js` calls this when it actually assembles the backend, which is the
+ * point at which the rule matters.
+ *
+ * @param {ReturnType<typeof loadConfig>} config
+ * @throws {Error} listing every redirect URI variable production is missing
+ */
+export function assertProductionRedirectUris(config) {
+  if (config.env !== 'production') return;
+
+  const missing = Object.values(REDIRECT_FLOWS)
+    .filter((flow) => !config.google[flow.field])
+    .map((flow) => flow.env);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `production requires one redirect URI per Google flow, missing ${missing.join(', ')}. ` +
+        'GOOGLE_REDIRECT_URI is a development fallback and must not be the only URI in production.',
+    );
+  }
 }
 
 /**
