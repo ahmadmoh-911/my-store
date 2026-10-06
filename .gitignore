@@ -11,3 +11,9 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Backend runtime databases (SQLite with WAL mode)
+server/data/
+*.db
+*.db-wal
+*.db-shm
