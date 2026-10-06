@@ -25,9 +25,7 @@
 import { getInstallId } from './identity-store.js';
 import { platformInfo } from './platform.js';
 import { setTrustedServerTime } from './clock.js';
-
-/** Default API base; overridden by the caller or tests. */
-const DEFAULT_BASE = '/api/license';
+import { resolveClientBase, getDefaultBase } from './api-config.js';
 
 /** @typedef {{baseUrl?: string, fetchImpl?: typeof fetch}} LicenseClientOptions */
 
@@ -47,16 +45,6 @@ export async function buildLicenseMetadata(options = {}) {
 }
 
 /**
- * Normalises the backend URL.
- *
- * @param {string} base
- * @returns {string} base without trailing slash
- */
-function normalizeBase(base) {
-  return base.replace(/\/+$/, '');
-}
-
-/**
  * Performs a POST to the licence backend.
  *
  * @param {string} endpoint   e.g. 'activate', 'verify', 'bind'
@@ -65,8 +53,9 @@ function normalizeBase(base) {
  * @returns {Promise<{ok: boolean, license?: object, serverTime: number, error?: {code: string, message: string}, [key: string]: any}>}
  */
 async function postLicense(endpoint, body, options = {}) {
-  const base = normalizeBase(options.baseUrl || DEFAULT_BASE);
-  const url = `${base}/${endpoint}`;
+  // Resolve base: absolute origin if configured, else relative path
+  const base = options.baseUrl || resolveClientBase('license');
+  const url = `${base.replace(/\/+$/, '')}/${endpoint}`;
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 

@@ -30,8 +30,7 @@
  * module never touches the DOM.
  */
 
-/** Default API base; overridden by the caller or by tests. */
-const DEFAULT_BASE = '/api/drive';
+import { resolveClientBase } from './api-config.js';
 
 /** @typedef {{baseUrl?: string, fetchImpl?: typeof fetch}} DriveAuthClientOptions */
 
@@ -41,6 +40,10 @@ function resolveFetch(options) {
   return impl;
 }
 
+function getBase(options) {
+  return (options.baseUrl || resolveClientBase('drive')).replace(/\/+$/, '');
+}
+
 /**
  * Reads the connection state for display in Settings.
  *
@@ -48,7 +51,7 @@ function resolveFetch(options) {
  * @returns {Promise<{connected: boolean, configured: boolean, scope: string|null, folderName: string, enabled: boolean}>}
  */
 export async function getDriveStatus(options = {}) {
-  const base = options.baseUrl || DEFAULT_BASE;
+  const base = getBase(options);
   const res = await resolveFetch(options)(`${base}/status`, {
     method: 'GET',
     credentials: 'same-origin',
@@ -78,7 +81,7 @@ export async function getDriveStatus(options = {}) {
  * @returns {Promise<{accessToken: string, expiresAt: number, scope: string}>}
  */
 export async function getDriveAccessToken(options = {}) {
-  const base = options.baseUrl || DEFAULT_BASE;
+  const base = getBase(options);
   const res = await resolveFetch(options)(`${base}/token`, {
     method: 'GET',
     credentials: 'same-origin',
@@ -106,7 +109,7 @@ export async function getDriveAccessToken(options = {}) {
  * @returns {Promise<{authUrl: string}>}
  */
 export async function startDriveConnect(options = {}) {
-  const base = options.baseUrl || DEFAULT_BASE;
+  const base = getBase(options);
   const res = await resolveFetch(options)(`${base}/connect/start`, {
     method: 'GET',
     credentials: 'same-origin',
@@ -128,7 +131,7 @@ export async function startDriveConnect(options = {}) {
  * @returns {Promise<{wasConnected: boolean}>}
  */
 export async function disconnectDrive(options = {}) {
-  const base = options.baseUrl || DEFAULT_BASE;
+  const base = getBase(options);
   const res = await resolveFetch(options)(`${base}/disconnect`, {
     method: 'POST',
     credentials: 'same-origin',

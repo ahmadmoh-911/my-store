@@ -11,9 +11,7 @@
 
 import { getAuthSession, saveAuthSession, clearAuthSession, hasValidAuthSession, saveAccountRecord } from './identity-store.js';
 import { setTrustedServerTime } from './clock.js';
-
-/** Default API base; overridden by the caller or tests. */
-const DEFAULT_BASE = '/api/auth';
+import { resolveClientBase } from './api-config.js';
 
 /** @typedef {{baseUrl?: string, fetchImpl?: typeof fetch}} AuthClientOptions */
 
@@ -28,11 +26,11 @@ const DEFAULT_BASE = '/api/auth';
  * @returns {Promise<{authUrl: string, state: string}>}
  */
 export async function startGoogleAuth(options = {}) {
-  const base = (options.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+  const base = options.baseUrl || resolveClientBase('auth');
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 
-  const res = await fetchImpl(`${base}/google/start`, {
+  const res = await fetchImpl(`${base.replace(/\/+$/, '')}/google/start`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -59,7 +57,7 @@ export async function startGoogleAuth(options = {}) {
  * @returns {Promise<{googleSub: string, email: string, displayName?: string, avatarUrl?: string}>}
  */
 export async function handleAuthCallback(searchParams, options = {}) {
-  const base = (options.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+  const base = options.baseUrl || resolveClientBase('auth');
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 
@@ -75,7 +73,7 @@ export async function handleAuthCallback(searchParams, options = {}) {
     throw new Error('Missing code or state in callback');
   }
 
-  const res = await fetchImpl(`${base}/google/callback`, {
+  const res = await fetchImpl(`${base.replace(/\/+$/, '')}/google/callback`, {
     method: 'GET',
     credentials: 'include',
     // The backend reads code/state from query params
@@ -115,11 +113,11 @@ export async function handleAuthCallback(searchParams, options = {}) {
  * @returns {Promise<{googleSub: string, email: string, displayName?: string, avatarUrl?: string}|null>}
  */
 export async function getCurrentAccount(options = {}) {
-  const base = (options.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+  const base = options.baseUrl || resolveClientBase('auth');
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 
-  const res = await fetchImpl(`${base}/me`, {
+  const res = await fetchImpl(`${base.replace(/\/+$/, '')}/me`, {
     method: 'GET',
     credentials: 'include',
   });
@@ -191,12 +189,12 @@ export async function getLocalAuthSession() {
  * @returns {Promise<void>}
  */
 export async function logout(options = {}) {
-  const base = (options.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+  const base = options.baseUrl || resolveClientBase('auth');
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 
   try {
-    await fetchImpl(`${base}/logout`, {
+    await fetchImpl(`${base.replace(/\/+$/, '')}/logout`, {
       method: 'POST',
       credentials: 'include',
     });
@@ -218,11 +216,11 @@ export async function logout(options = {}) {
  * @returns {Promise<string|null>}
  */
 export async function getGoogleClientId(options = {}) {
-  const base = (options.baseUrl || DEFAULT_BASE).replace(/\/+$/, '');
+  const base = options.baseUrl || resolveClientBase('auth');
   const fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : undefined);
   if (!fetchImpl) throw new Error('No fetch implementation available');
 
-  const res = await fetchImpl(`${base}/me`, { method: 'GET', credentials: 'include' });
+  const res = await fetchImpl(`${base.replace(/\/+$/, '')}/me`, { method: 'GET', credentials: 'include' });
   if (!res.ok) return null;
   const data = await res.json();
   return data.googleClientId ?? null;
