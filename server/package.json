@@ -13,7 +13,6 @@
     "issue": "node scripts/issue-license.mjs"
   },
   "dependencies": {
-    "deasync": "^0.1.31",
     "pg": "^8.23.1"
   }
 }
