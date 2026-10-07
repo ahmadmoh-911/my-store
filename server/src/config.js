@@ -4,7 +4,66 @@
  * Everything that differs between a laptop and a real deployment is read here,
  * once, so the rest of the server never touches process.env directly and no
  * module has to guess a default that might be wrong in production.
+ *
+ * Env-file loading also happens here, so the server reads `server/.env` the
+ * same way no matter which directory it is launched from.
  */
+
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+/**
+ * Root of the server package, derived from this file's own location rather than
+ * `process.cwd()`. That is what lets `node server/src/index.js` and
+ * `npm start` inside `server/` resolve the same `server/.env` file.
+ */
+const SERVER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** @returns {string} the absolute path of the env file this server reads. */
+export function envFilePath() {
+  return path.join(SERVER_ROOT, '.env');
+}
+
+/**
+ * Loads `server/.env` into `into` if the file exists.
+ *
+ * Existing variables are never overwritten — an explicitly exported value wins
+ * over the file, which is what lets a production deploy override the file.
+ * Values are parsed like dotenv: `KEY=VALUE` lines, `#` comments (a comment
+ * starts at the first ` #` or at the start of the line), and surrounding
+ * matching quotes are stripped. Nothing is logged and no value leaves this
+ * function.
+ *
+ * @param {Record<string, string>} [into=process.env]
+ * @returns {boolean} true when a file was found and read
+ */
+export function loadEnvFile(into = process.env) {
+  const file = envFilePath();
+  if (!existsSync(file)) return false;
+  const text = readFileSync(file, 'utf8');
+  for (const rawLine of text.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    // An inline comment must be preceded by whitespace so a value containing
+    // '#' (a legal URI/secret character) is kept intact: `A=foo#bar` keeps
+    // "foo#bar", `A=foo # comment` keeps "foo".
+    const comment = value.search(/\s+#/);
+    if (comment !== -1) value = value.slice(0, comment).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key && !(key in into)) into[key] = value;
+  }
+  return true;
+}
 
 /**
  * The pepper mixed into every code hash.
@@ -55,6 +114,12 @@ function readPepper(env) {
  * }}
  */
 export function loadConfig(env = process.env) {
+  // One place where the `.env` file feeds the process: only when the caller
+  // really means "the environment" (not when a test passes a bespoke object),
+  // and it never clobbers variables that are already set.
+  if (env === process.env) {
+    loadEnvFile();
+  }
   const nodeEnv = env.NODE_ENV || 'development';
   const memory = env.STOREHUB_DB === ':memory:';
 
