@@ -10,7 +10,7 @@
  * auth, or Drive beyond what is required to implement the repository methods.
  */
  
-import { createSupabaseClient } from './pg.js';
+import { createSupabaseClient, createPgDatabaseAdapter } from './pg.js';
 import { createAuthRepository } from './auth-repository.js';
 
 /**
@@ -29,29 +29,10 @@ export async function openAuthDatabase(file, deps = {}) {
    // one is the only case that creates its own.
    const pgClient_ = pgClient || createSupabaseClient(config);
 
-   // Create a db object that mimics the shape expected by createAuthRepository
-   const db = {
-      prepare(sql) {
-         return {
-            run(params) {
-               pgClient_.exec(sql, params);
-            },
-            get(params) {
-               const result = pgClient_.query(sql, params);
-               return result[0] || null;
-            },
-            all(params) {
-               return pgClient_.query(sql, params);
-            },
-         };
-      },
-      exec(sql, params) {
-         pgClient_.exec(sql, params);
-      },
-      close() {
-         pgClient_.close();
-      },
-   };
+   // A db object matching the shape createAuthRepository expects. The adapter
+   // performs the SQLite→PostgreSQL translation (named parameters, `BEGIN
+   // IMMEDIATE` → real single-connection transaction) transparently.
+   const db = createPgDatabaseAdapter(pgClient_);
 
    const repo = createAuthRepository(db, { clock, pepper });
    return { db, repo };

@@ -12,6 +12,13 @@
  *
  * Requests are strictly serialized (one in flight at a time), which matches
  * the synchronous callers that use this client.
+ *
+ * The worker also supports a "session": one borrowed connection that holds an
+ * open transaction. SQLite runs BEGIN..COMMIT on a single connection, and the
+ * repositories call db.exec('BEGIN IMMEDIATE')/COMMIT/ROLLBACK around a few
+ * writes with no reads in between, so a session is the faithful equivalent —
+ * statements issued between sessionBegin and sessionEnd all travel to one
+ * client; everything else uses the pool.
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
@@ -82,21 +89,25 @@ function serializeError(err) {
   };
 }
 
+// A borrowed client with an open transaction, while the caller is between
+// db.exec('BEGIN IMMEDIATE') and db.exec('COMMIT'|'ROLLBACK').
+let session = null;
+
 parentPort.on('message', async (msg) => {
-  const { id, op, text, params, tx } = msg;
+  const { id, op, text, params, tx, commit } = msg;
   try {
     if (op === 'query' || op === 'exec') {
       const res = await pool.query(text, params || []);
-      publish({ id, ok: true, rows: res.rows });
+      publish({ id, ok: true, rows: res.rows, rowCount: res.rowCount });
     } else if (op === 'tx') {
-      // Run a sequence of statements on one connection (real transaction).
+      // Buffered transaction: a fixed list of statements on one connection.
       const client = await pool.connect();
       const results = [];
       try {
         await client.query('BEGIN');
         for (const statement of tx) {
           const res = await client.query(statement.text, statement.params || []);
-          results.push({ rows: res.rows });
+          results.push({ rows: res.rows, rowCount: res.rowCount });
         }
         await client.query('COMMIT');
       } catch (err) {
@@ -106,6 +117,41 @@ parentPort.on('message', async (msg) => {
         client.release();
       }
       publish({ id, ok: true, results });
+    } else if (op === 'sessionBegin') {
+      if (session) {
+        throw new Error('storehub-pg: a transaction is already open on this client');
+      }
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        session = client;
+        publish({ id, ok: true });
+      } catch (err) {
+        client.release();
+        throw err;
+      }
+    } else if (op === 'sessionExec') {
+      if (!session) throw new Error('storehub-pg: no open transaction for this statement');
+      const res = await session.query(text, params || []);
+      publish({ id, ok: true, rows: res.rows, rowCount: res.rowCount });
+    } else if (op === 'sessionEnd') {
+      if (!session) {
+        // ROLLBACK after an already-rolled-back transaction is a no-op in the
+        // repository code; COMMIT without a transaction is a real error.
+        if (commit) throw new Error('storehub-pg: COMMIT with no open transaction');
+        publish({ id, ok: true });
+      } else {
+        try {
+          await session.query(commit ? 'COMMIT' : 'ROLLBACK');
+          session.release();
+          session = null;
+          publish({ id, ok: true });
+        } catch (err) {
+          try { session.release(); } catch { /* already returned */ }
+          session = null;
+          throw err;
+        }
+      }
     } else if (op === 'close') {
       try { await pool.end(); } catch { /* draining */ }
       publish({ id, ok: true });

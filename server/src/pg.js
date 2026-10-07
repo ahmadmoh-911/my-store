@@ -57,6 +57,101 @@ export function parseConnectionUri(connectionString) {
 }
 
 /**
+ * Translates SQLite-style named parameters (`$name`) into PostgreSQL positional
+ * placeholders (`$1`, `$2`, …), returning the placeholder order.
+ *
+ * The repositories are written once against SQLite's named-parameter dialect.
+ * PostgreSQL only accepts positional placeholders, so every statement crossing
+ * the adapter is translated once at prepare time and each call's params object
+ * is re-packed into the positional array.
+ *
+ * @param {string} sql
+ * @returns {{sql: string, keys: string[]}}
+ */
+export function translateSql(sql) {
+  const keys = [];
+  const seen = new Map();
+  const translated = sql.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (match, name) => {
+    let index = seen.get(name);
+    if (index === undefined) {
+      index = keys.length + 1;
+      seen.set(name, index);
+      keys.push(name);
+    }
+    return `$${index}`;
+  });
+  return { sql: translated, keys };
+}
+
+/** Re-packs a named-params object into the positional array for translated SQL. */
+function positionals(params, keys) {
+  return keys.map((key) => (params && params[key] !== undefined ? params[key] : null));
+}
+
+/** @param {string} sql @returns {string} the first keyword, normalized */
+function headWord(sql) {
+  return String(sql).trim().toUpperCase().split(/\s+/).join(' ');
+}
+
+/**
+ * Builds the `db` object the repositories are written against (`prepare`,
+ * `exec`, `close`) on top of the synchronous PostgreSQL client.
+ *
+ * It absorbs the two SQLite↔PostgreSQL differences that matter at runtime:
+ *  - named parameters become positional placeholders;
+ *  - `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` become a real transaction on one
+ *    connection (session ops), matching SQLite's single-connection semantics.
+ *
+ * `run` returns `{ changes }` like the SQLite statements do, because the
+ * repositories read `.changes` from run for deletes and cleanups.
+ *
+ * @param {ReturnType<typeof createSupabaseClient>} pgClient
+ * @returns {{prepare: (sql: string) => {run: Function, get: Function, all: Function}, exec: (sql: string) => void, close: () => void}}
+ */
+function createPgDatabaseAdapter(pgClient) {
+  return {
+    prepare(sql) {
+      const { sql: translated, keys } = translateSql(sql);
+      return {
+        run(params) {
+          return { changes: pgClient.exec(translated, positionals(params, keys)) };
+        },
+        get(params) {
+          const rows = pgClient.query(translated, positionals(params, keys));
+          return rows[0] || null;
+        },
+        all(params) {
+          return pgClient.query(translated, positionals(params, keys));
+        },
+      };
+    },
+    exec(sql) {
+      const head = headWord(sql);
+      if (head === 'BEGIN' || head === 'BEGIN IMMEDIATE') {
+        pgClient.sessionBegin();
+        return;
+      }
+      if (head === 'COMMIT') {
+        pgClient.sessionEnd(true);
+        return;
+      }
+      if (head === 'ROLLBACK') {
+        pgClient.sessionEnd(false);
+        return;
+      }
+      if (head.startsWith('PRAGMA ')) {
+        // SQLite-only connection pragma; the PostgreSQL path sets no pragmas.
+        return;
+      }
+      pgClient.exec(sql, []);
+    },
+    close() {
+      pgClient.close();
+    },
+  };
+}
+
+/**
  * Creates a synchronous PostgreSQL client backed by a `pg` pool in a worker
  * thread.
  *
@@ -132,21 +227,29 @@ function createPostgresClient(config = {}) {
     sized[0] = 0;
     Atomics.store(flag, 0, 0);
     worker.postMessage({ id, op, ...body });
-    Atomics.wait(flag, 0, 0, Math.max(waitMs, 1));
-    if (Atomics.load(flag, 0) !== 1) {
-      if (workerError) throw workerError;
-      const err = new Error(`storehub-pg: ${what} exceeded the ${waitMs}ms deadline (connection unreachable or stalled)`);
-      err.code = 'STOREHUB_PG_TIMEOUT';
-      throw err;
+    const deadline = Date.now() + Math.max(waitMs, 1);
+    while (Date.now() < deadline) {
+      Atomics.wait(flag, 0, 0, Math.max(deadline - Date.now(), 1));
+      if (Atomics.load(flag, 0) !== 1) continue;
+      const payload = JSON.parse(decoder.decode(data.subarray(0, sized[0])));
+      if (payload.id === id) {
+        if (!payload.ok) {
+          const err = new Error(payload.error.message || 'storehub-pg: unknown database error');
+          if (payload.error.name) err.name = payload.error.name;
+          if (payload.error.code) err.code = payload.error.code;
+          throw err;
+        }
+        return payload;
+      }
+      // A reply from a previously timed-out op arrived late. Discard it and
+      // keep waiting for the current op within its deadline.
+      sized[0] = 0;
+      Atomics.store(flag, 0, 0);
     }
-    const payload = JSON.parse(decoder.decode(data.subarray(0, sized[0])));
-    if (!payload.ok) {
-      const err = new Error(payload.error.message || 'storehub-pg: unknown database error');
-      if (payload.error.name) err.name = payload.error.name;
-      if (payload.error.code) err.code = payload.error.code;
-      throw err;
-    }
-    return payload;
+    if (workerError) throw workerError;
+    const err = new Error(`storehub-pg: ${what} exceeded the ${waitMs}ms deadline (connection unreachable or stalled)`);
+    err.code = 'STOREHUB_PG_TIMEOUT';
+    throw err;
   }
 
   return {
@@ -156,9 +259,10 @@ function createPostgresClient(config = {}) {
       return payload.rows;
     },
 
-    /** @param {string} text @param {Array} [params] @returns {void} */
+    /** @param {string} text @param {Array} [params] @returns {number} affected rows */
     exec(text, params) {
-      call('exec', { text, params: params || [] }, 'exec');
+      const payload = call('exec', { text, params: params || [] }, 'exec');
+      return payload.rowCount || 0;
     },
 
     /**
@@ -169,6 +273,22 @@ function createPostgresClient(config = {}) {
     transaction(statements) {
       const payload = call('tx', { tx: statements }, 'transaction');
       return payload.results;
+    },
+
+    /** Starts a single-connection transaction (SQLite `BEGIN IMMEDIATE` equivalent). */
+    sessionBegin() {
+      call('sessionBegin', {}, 'session begin');
+    },
+
+    /** Runs one statement on the open session connection. @returns {Array} rows */
+    sessionExec(text, params) {
+      const payload = call('sessionExec', { text, params: params || [] }, 'session statement');
+      return payload.rows;
+    },
+
+    /** Commits (true) or rolls back (false) the session. @param {boolean} commit */
+    sessionEnd(commit) {
+      call('sessionEnd', { commit: !!commit }, 'session end');
     },
 
     /** Ends the pool and the worker. Idempotent. */
@@ -201,4 +321,4 @@ function createSupabaseClient(config) {
   return createPostgresClient({ connectionString: config.supabaseDbUrl });
 }
 
-export { createPostgresClient, createSupabaseClient };
+export { createPostgresClient, createSupabaseClient, createPgDatabaseAdapter };
