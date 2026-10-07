@@ -46,10 +46,16 @@ export async function buildApplication(options = {}) {
    let openLicenseDatabase;
    let openAuthDatabase;
    let openDriveDatabase;
+   let pgClient = null;
    if (config.usePostgres) {
      const pgLicense = await import('./pg-license-repository.js');
      const pgAuth = await import('./pg-auth-repository.js');
      const pgDrive = await import('./pg-drive-repository.js');
+     const { createSupabaseClient } = await import('./pg.js');
+     // One shared pool for every repository. Creating the client is cheap; the
+     // boot check below is what makes a bad connection fail loudly instead of
+     // surfacing as a confusing first-request hang.
+     pgClient = createSupabaseClient(config);
      openLicenseDatabase = pgLicense.openLicenseDatabase;
      openAuthDatabase = pgAuth.openAuthDatabase;
      openDriveDatabase = pgDrive.openDriveDatabase;
@@ -79,19 +85,40 @@ export async function buildApplication(options = {}) {
 
    const clock = () => Date.now();
 
+   if (pgClient) {
+     // PostgreSQL mode: verify the connection synchronously at boot. A missing,
+     // invalid, or unreachable SUPABASE_DB_URL therefore stops the server fast
+     // with a clear message instead of a silent SQLite fallback or a first-call
+     // hang. The error text is classified and never contains the credentials.
+     let pgHost = 'unknown';
+     try {
+       pgHost = config.supabaseDbUrl ? new URL(config.supabaseDbUrl).hostname : 'unknown';
+     } catch {}
+     try {
+       pgClient.query('SELECT 1');
+     } catch (err) {
+       try { pgClient.close(); } catch {}
+       throw new Error(
+         `PostgreSQL mode is enabled but the database is unreachable ` +
+         `(host=${pgHost}): ${err.message}`,
+       );
+     }
+   }
+
    // Note the two different shapes, which is easy to get backwards:
    // `openLicenseDatabase` hands back the repository itself, while
    // `openAuthDatabase` hands back `{ db, repo }`. Reading `.repo` off the
    // licence one yields undefined and the first request fails with a confusing
    // "cannot read property of undefined" — so the licence repository is used
    // directly here and a test builds this same graph to keep it honest.
-   const licenseRepository = openLicenseDatabase(config.databaseFile, { clock, config });
+   const licenseRepository = openLicenseDatabase(config.databaseFile, { clock, config, pgClient });
    const licenseService = createLicenseService({ repository: licenseRepository, config, clock, log });
 
    const authDb = await openAuthDatabase(config.databaseFile, {
      clock,
      pepper: config.pepper,
      config,
+     pgClient,
    });
 
    // The Drive grant gets its own database, always. `drive.db` is a *different
@@ -105,6 +132,7 @@ export async function buildApplication(options = {}) {
      clock,
      pepper: config.pepper,
      config,
+     pgClient,
    });
 
    // Drive first: the auth service needs the grant sink in order to record a

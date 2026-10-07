@@ -10,44 +10,46 @@
  * auth, or Drive beyond what is required to implement the repository methods.
  */
  
-const { createSupabaseClient } = require('./pg.js');
-const { createDriveRepository } = require('./drive-repository.js');
+import { createSupabaseClient } from './pg.js';
+import { createDriveRepository } from './drive-repository.js';
 
 /**
- * Opens a PostgreSQL drive database.
+ * Opens the PostgreSQL drive database.
  *
  * @param {string} file - Ignored for PostgreSQL (kept for compatibility)
- * @param {{clock: () => number, pepper: string, config: object}} deps
+ * @param {{clock: () => number, pepper: string, config?: object, pgClient?: object}} deps
  * @returns {{db: object, repo: DriveRepository}}
  */
 export async function openDriveDatabase(file, deps = {}) {
-   const { clock, pepper, config } = deps;
+   const { clock, pepper, config, pgClient } = deps;
    if (!config) {
       throw new Error('Config is required for PostgreSQL adapter');
    }
-   const pgClient = createSupabaseClient(config);
+   // One shared pool: index.js hands the client in. A standalone caller without
+   // one is the only case that creates its own.
+   const pgClient_ = pgClient || createSupabaseClient(config);
 
    // Create a db object that mimics the shape expected by createDriveRepository
    const db = {
       prepare(sql) {
          return {
             run(params) {
-               pgClient.exec(sql, params);
+               pgClient_.exec(sql, params);
             },
             get(params) {
-               const result = pgClient.query(sql, params);
+               const result = pgClient_.query(sql, params);
                return result[0] || null;
             },
             all(params) {
-               return pgClient.query(sql, params);
+               return pgClient_.query(sql, params);
             },
          };
       },
       exec(sql, params) {
-         pgClient.exec(sql, params);
+         pgClient_.exec(sql, params);
       },
       close() {
-         pgClient.close();
+         pgClient_.close();
       },
    };
 

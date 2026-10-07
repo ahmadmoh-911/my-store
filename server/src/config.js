@@ -136,7 +136,11 @@ export function loadConfig(env = process.env) {
     supabaseUrl: env.SUPABASE_URL || null,
     supabaseDbUrl: env.SUPABASE_DB_URL || null,
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || null,
-    usePostgres: !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) || !!env.SUPABASE_DB_URL,
+    // PostgreSQL mode is decided by the database URL alone. SUPABASE_URL /
+    // SUPABASE_SERVICE_ROLE_KEY are API credentials and must not be able to turn
+    // this on: a missing or wrong DB URL fails fast instead of silently running
+    // the backend on a connection nobody configured.
+    usePostgres: !!env.SUPABASE_DB_URL,
 
     /**
      * scrypt work factors.

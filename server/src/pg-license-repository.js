@@ -11,23 +11,25 @@
  * auth, or Drive beyond what is required to implement the repository methods.
  */
  
-const { createSupabaseClient } = require('./pg.js');
-const { randomUUID } = require('node:crypto');
-const { createLicenseRepository } = require('./repository.js');
+import { createSupabaseClient } from './pg.js';
+import { randomUUID } from 'node:crypto';
+import { createLicenseRepository } from './repository.js';
 
 /**
- * Opens a PostgreSQL licence database.
+ * Opens the PostgreSQL licence repository.
  *
  * @param {string} file - Ignored for PostgreSQL (kept for compatibility)
- * @param {{clock: () => number, config: object}} deps
+ * @param {{clock: () => number, config?: object, pgClient?: object}} deps
  * @returns {import('./repository.js').LicenseRepository}
  */
 export function openLicenseDatabase(file, deps = {}) {
-   const { clock, config } = deps;
+   const { clock, config, pgClient } = deps;
    if (!config) {
       throw new Error('Config is required for PostgreSQL adapter');
    }
-   const pgClient = createSupabaseClient(config);
+   // One shared pool: index.js hands the client in. A standalone caller without
+   // one is the only case that creates its own.
+   const pgClient_ = pgClient || createSupabaseClient(config);
 
    // We need to adapt the client to match the shape expected by createLicenseRepository.
    // The createLicenseRepository expects a db object with methods: prepare, exec, close.
@@ -53,22 +55,22 @@ export function openLicenseDatabase(file, deps = {}) {
       prepare(sql) {
          return {
             run(params) {
-               pgClient.exec(sql, params);
+               pgClient_.exec(sql, params);
             },
             get(params) {
-               const result = pgClient.query(sql, params);
+               const result = pgClient_.query(sql, params);
                return result[0] || null;
             },
             all(params) {
-               return pgClient.query(sql, params);
+               return pgClient_.query(sql, params);
             },
          };
       },
       exec(sql, params) {
-         pgClient.exec(sql, params);
+         pgClient_.exec(sql, params);
       },
       close() {
-         pgClient.close();
+         pgClient_.close();
       },
    };
 
