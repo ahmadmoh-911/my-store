@@ -11,6 +11,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+temp/
 
 # Backend runtime databases (SQLite with WAL mode)
 server/data/

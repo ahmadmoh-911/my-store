@@ -1,0 +1,41 @@
+FINAL FIX SUMMARY FOR check_restrictive_policy FUNCTION
+
+Issues Fixed:
+1. Malformed string literals: Removed all occurrences of 'current_user = ''''
+2. Invalid role comparisons: Changed 'roles = p_role' to 'p_role = ANY(roles)' 
+3. Added proper handling for public policies: Added 'OR roles IS NULL' condition
+4. Corrected function return type: Changed from RETURNS BOOLEAN to RETURNS SETOF INTEGER
+5. Corrected function body: Changed from boolean return to RETURN QUERY SELECT 1 ...
+6. Fixed dollar quoting: Uses $proc$ to avoid conflict with outer $$ block
+
+Current Function Implementation:
+CREATE OR REPLACE FUNCTION check_restrictive_policy(p_scheme TEXT, p_table TEXT, p_role TEXT)
+RETURNS SETOF INTEGER
+LANGUAGE plpgsql
+AS $proc$
+BEGIN
+    RETURN QUERY
+    SELECT 1
+    FROM pg_policies
+    WHERE schemaname = p_scheme
+      AND tablename = p_table
+      AND (roles IS NULL OR roles = '{}' OR p_role = ANY(roles))
+      AND qual = 'false'
+      AND with_check = 'false';
+END;
+$proc$
+
+Verification Completed:
+- ✅ No malformed current_user = '''') strings
+- ✅ No invalid roles = p_role comparisons  
+- ✅ Proper role checking: p_role = ANY(roles) OR roles IS NULL
+- ✅ Correct qual and with_check column usage
+- ✅ No v_fainted variables
+- ✅ v_passed/v_failed/v_total variables correct
+- ✅ All record_test calls use CALL
+- ✅ All check_restrictive_policy calls use PERFORM
+- ✅ Proper dollar quoting ($proc$ for internal, $$ for outer)
+- ✅ No fake tests (no CASE WHEN 1=1, no unconditional PASS, etc.)
+- ✅ No changes to 001_initial_schema.sql or application code
+
+The function now correctly validates that deny-all policies exist for the specified schema, table, and role by returning rows only when restrictive policies are found, which works correctly with the PERFORM ... IF NOT FOUND THEN ... test pattern used throughout the validation script.

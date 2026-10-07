@@ -303,6 +303,7 @@ export function openInvoiceSheet(sale, opts = {}) {
         totalsHost
       );
   }
+  /**
    * Recomputes the totals block in place. Used while typing a price or a
    * discount: a full repaint would steal focus mid-keystroke.
    */

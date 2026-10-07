@@ -9,9 +9,11 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/",
+    "test": "node --test",
     "issue": "node scripts/issue-license.mjs"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "deasync": "^0.1.31",
+    "pg": "^8.23.1"
+  }
 }

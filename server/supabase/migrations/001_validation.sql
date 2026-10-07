@@ -1,348 +1,1513 @@
--- Store Hub — Supabase Migration Validation Tests
--- Run these against a fresh Supabase project after applying 001_initial_schema.sql
--- Returns PASS/FAIL for each check.
+-- Phase 1 Validation Script for Supabase Schema
+-- Tests structural integrity, constraints, and RLS policies
+-- Uses proper exception handling to verify constraint violations
 
--- =============================================================================
--- 1. TABLE EXISTENCE
--- =============================================================================
-SELECT 'TABLE CHECK' AS test_category, table_name AS target,
-       CASE WHEN table_name IS NOT NULL THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.tables
-WHERE table_schema = 'public' AND table_name IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-)
-ORDER BY table_name;
+DO $$
+DECLARE
+    -- Test tracking variables
+    v_passed INTEGER;
+    v_failed INTEGER;
+    v_total INTEGER;
+    v_test_name TEXT;
+    v_detail TEXT;
+    
+    -- Temporary test data
+    v_test_google_sub TEXT := '__phase1_validation_google_sub_' || random()::TEXT;
+    v_test_license_code TEXT := '__phase1_validation_license_code_' || random()::TEXT;
+    v_test_license_id UUID;
+    v_test_installation_id TEXT := '__phase1_validation_installation_' || random()::TEXT;
+    v_test_token_id TEXT := '__phase1_validation_token_' || random()::TEXT;
+    v_test_session_id TEXT := '__phase1_validation_session_' || random()::TEXT;
+    v_test_drive_grant_id TEXT := '__phase1_validation_drive_' || random()::TEXT;
+    
+    -- Exception tracking
+    v_exception_occurred BOOLEAN;
+    v_exception_sqlstate TEXT;
+    v_exception_message TEXT;
+BEGIN
+    -- Create temporary table for counters
+    CREATE TEMP TABLE test_counters (passed INTEGER, failed INTEGER, total INTEGER);
+    INSERT INTO test_counters VALUES (0,0,0);
+    -- Helper procedure to record test results
+    CREATE OR REPLACE PROCEDURE record_test(
+        p_test_name TEXT,
+        p_passed BOOLEAN,
+        p_detail TEXT DEFAULT ''
+    )
+    LANGUAGE plpgsql
+    AS $proc$
+    BEGIN
+        IF p_passed THEN
+            UPDATE test_counters SET passed = passed + 1;
+            RAISE NOTICE 'PASS: % - %', p_test_name, p_detail;
+        ELSE
+            UPDATE test_counters SET failed = failed + 1;
+            RAISE NOTICE 'FAIL: % - %', p_test_name, p_detail;
+        END IF;
+        UPDATE test_counters SET total = total + 1;
+    END;
+    $proc$;
 
--- =============================================================================
--- 2. COLUMN EXISTENCE & TYPES
--- =============================================================================
-SELECT 'COLUMN CHECK' AS test_category,
-       table_name || '.' || column_name AS target,
-       CASE WHEN data_type = expected_type THEN 'PASS' ELSE 'FAIL: expected ' || expected_type || ' got ' || data_type END AS result
-FROM (VALUES
-    ('licenses', 'id', 'uuid'),
-    ('licenses', 'code_lookup', 'text'),
-    ('licenses', 'code_salt', 'text'),
-    ('licenses', 'code_hash', 'text'),
-    ('licenses', 'status', 'text'),
-    ('licenses', 'created_at', 'timestamp with time zone'),
-    ('licenses', 'activated_at', 'timestamp with time zone'),
-    ('licenses', 'expires_at', 'timestamp with time zone'),
-    ('licenses', 'linked_account_id', 'text'),
-    ('licenses', 'last_verified_at', 'timestamp with time zone'),
-    ('licenses', 'note', 'text'),
-    ('license_tokens', 'token_lookup', 'text'),
-    ('license_tokens', 'license_id', 'uuid'),
-    ('license_tokens', 'created_at', 'timestamp with time zone'),
-    ('license_tokens', 'last_used_at', 'timestamp with time zone'),
-    ('license_tokens', 'revoked_at', 'timestamp with time zone'),
-    ('license_installs', 'license_id', 'uuid'),
-    ('license_installs', 'install_id', 'text'),
-    ('license_installs', 'platform', 'text'),
-    ('license_installs', 'app_version', 'text'),
-    ('license_installs', 'first_seen_at', 'timestamp with time zone'),
-    ('license_installs', 'last_seen_at', 'timestamp with time zone'),
-    ('license_installs', 'last_verified_at', 'timestamp with time zone'),
-    ('license_events', 'id', 'bigint'),
-    ('license_events', 'license_id', 'uuid'),
-    ('license_events', 'event', 'text'),
-    ('license_events', 'at', 'timestamp with time zone'),
-    ('license_events', 'install_id', 'text'),
-    ('license_events', 'detail', 'text'),
-    ('auth_accounts', 'google_sub', 'text'),
-    ('auth_accounts', 'email', 'text'),
-    ('auth_accounts', 'display_name', 'text'),
-    ('auth_accounts', 'avatar_url', 'text'),
-    ('auth_accounts', 'created_at', 'timestamp with time zone'),
-    ('auth_accounts', 'last_login_at', 'timestamp with time zone'),
-    ('auth_sessions', 'session_lookup', 'text'),
-    ('auth_sessions', 'google_sub', 'text'),
-    ('auth_sessions', 'created_at', 'timestamp with time zone'),
-    ('auth_sessions', 'expires_at', 'timestamp with time zone'),
-    ('auth_sessions', 'last_used_at', 'timestamp with time zone'),
-    ('auth_sessions', 'user_agent', 'text'),
-    ('drive_grants', 'google_sub', 'text'),
-    ('drive_grants', 'refresh_cipher', 'text'),
-    ('drive_grants', 'scopes', 'text'),
-    ('drive_grants', 'granted_at', 'timestamp with time zone'),
-    ('drive_grants', 'updated_at', 'timestamp with time zone'),
-    ('drive_grants', 'revoked_at', 'timestamp with time zone')
-) AS expected(table_name, column_name, expected_type)
-LEFT JOIN information_schema.columns c
-  ON c.table_schema = 'public' AND c.table_name = expected.table_name AND c.column_name = expected.column_name
-ORDER BY table_name, column_name;
+    -- Initialize counters
+    v_passed := 0;
+    v_failed := 0;
+    v_total := 0;
 
--- =============================================================================
--- 3. PRIMARY KEYS
--- =============================================================================
-SELECT 'PRIMARY KEY CHECK' AS test_category,
-       tc.table_name AS target,
-       CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.table_constraints tc
-WHERE tc.table_schema = 'public' AND tc.table_name IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-) AND tc.constraint_type = 'PRIMARY KEY'
-ORDER BY tc.table_name;
+    RAISE NOTICE 'Starting Phase 1 Schema Validation...';
+    RAISE NOTICE '----------------------------------------';
 
--- =============================================================================
--- 4. FOREIGN KEYS
--- =============================================================================
-SELECT 'FOREIGN KEY CHECK' AS test_category,
-       tc.table_name || '.' || kcu.column_name || ' -> ' || ccu.table_name || '.' || ccu.column_name AS target,
-       CASE WHEN tc.constraint_type = 'FOREIGN KEY' THEN 'PASS' ELSE 'FAIL' END AS result,
-       rc.delete_rule AS on_delete,
-       rc.update_rule AS on_update
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-JOIN information_schema.constraint_column_usage ccu
-  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-JOIN information_schema.referential_constraints rc
-  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema
-WHERE tc.table_schema = 'public' AND tc.constraint_type = 'FOREIGN KEY'
-  AND tc.table_name IN ('licenses', 'license_tokens', 'license_installs', 'license_events', 'auth_sessions', 'drive_grants')
-ORDER BY tc.table_name, kcu.column_name;
+    -- 1. STRUCTURAL VALIDATION: Table existence
+    v_test_name := 'Table existence: google_accounts';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table google_accounts does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 5. UNIQUE CONSTRAINTS
--- =============================================================================
-SELECT 'UNIQUE CONSTRAINT CHECK' AS test_category,
-       tc.table_name || '.' || string_agg(kcu.column_name, ', ') AS target,
-       CASE WHEN tc.constraint_type = 'UNIQUE' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-WHERE tc.table_schema = 'public' AND tc.constraint_type = 'UNIQUE'
-  AND tc.table_name IN ('licenses', 'license_tokens', 'license_installs', 'license_events', 'auth_accounts', 'auth_sessions', 'drive_grants')
-GROUP BY tc.table_name, tc.constraint_name
-ORDER BY tc.table_name;
+    v_test_name := 'Table existence: licenses';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'licenses';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table licenses does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 6. NOT NULL CONSTRAINTS
--- =============================================================================
-SELECT 'NOT NULL CHECK' AS test_category,
-       table_name || '.' || column_name AS target,
-       CASE WHEN is_nullable = 'NO' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-) AND column_name IN (
-    'id', 'code_lookup', 'code_salt', 'code_hash', 'status', 'created_at',
-    'token_lookup', 'license_id', 'created_at',
-    'license_id', 'install_id', 'first_seen_at', 'last_seen_at',
-    'id', 'license_id', 'event', 'at',
-    'google_sub', 'email', 'created_at', 'last_login_at',
-    'session_lookup', 'google_sub', 'created_at', 'expires_at',
-    'google_sub', 'refresh_cipher', 'scopes', 'granted_at', 'updated_at'
-)
-ORDER BY table_name, column_name;
+    v_test_name := 'Table existence: license_tokens';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'license_tokens';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table license_tokens does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 7. CHECK CONSTRAINTS (status values)
--- =============================================================================
-SELECT 'CHECK CONSTRAINT CHECK' AS test_category,
-       tc.table_name || ': ' || cc.check_clause AS target,
-       'PASS' AS result
-FROM information_schema.table_constraints tc
-JOIN information_schema.check_constraints cc
-  ON tc.constraint_name = cc.constraint_name AND tc.table_schema = cc.constraint_schema
-WHERE tc.table_schema = 'public' AND tc.constraint_type = 'CHECK'
-  AND tc.table_name = 'licenses';
+    v_test_name := 'Table existence: license_installations';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'license_installations';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table license_installations does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 8. INDEXES
--- =============================================================================
-SELECT 'INDEX CHECK' AS test_category,
-       indexname AS target,
-       'PASS' AS result
-FROM pg_indexes
-WHERE schemaname = 'public' AND tablename IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-) AND indexname IN (
-    'idx_licenses_code_lookup',
-    'idx_licenses_linked_account',
-    'idx_licenses_status_created',
-    'idx_license_tokens_license',
-    'idx_license_tokens_revoked',
-    'idx_license_installs_license',
-    'idx_license_events_license_time',
-    'idx_auth_sessions_google_sub',
-    'idx_auth_sessions_expires'
-)
-ORDER BY tablename, indexname;
+    v_test_name := 'Table existence: license_events';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'license_events';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table license_events does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 9. RLS ENABLED
--- =============================================================================
-SELECT 'RLS CHECK' AS test_category,
-       tablename AS target,
-       CASE WHEN rowsecurity THEN 'PASS' ELSE 'FAIL' END AS result
-FROM pg_tables
-WHERE schemaname = 'public' AND tablename IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-)
-ORDER BY tablename;
+    v_test_name := 'Table existence: login_sessions';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'login_sessions';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table login_sessions does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 10. RLS POLICIES (deny for anon/authenticated)
--- =============================================================================
-SELECT 'RLS POLICY CHECK' AS test_category,
-       policyname AS target,
-       CASE WHEN cmd = 'ALL' AND 'anon' = ANY(roles) AND qual = 'false' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM pg_policies
-WHERE schemaname = 'public' AND tablename IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-) AND 'anon' = ANY(roles)
-ORDER BY tablename, policyname;
+    v_test_name := 'Table existence: drive_grants';
+    BEGIN
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = 'drive_grants';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Table drive_grants does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Table exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 11. RELATIONSHIP TESTS (Data-level validation)
--- =============================================================================
+    -- 2. COLUMN VALIDATION: google_accounts
+    v_test_name := 'Column existence: google_accounts.google_sub';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'google_sub';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.google_sub does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- A. A license can reference a valid auth account.
-INSERT INTO auth_accounts (google_sub, email, created_at, last_login_at)
-VALUES ('test-sub-1', 'test@example.com', now(), now());
+    v_test_name := 'Column existence: google_accounts.email';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'email';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.email does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
-INSERT INTO licenses (code_lookup, code_salt, code_hash, status, linked_account_id)
-VALUES ('test-lookup-1', 'salt1', 'hash1', 'active', 'test-sub-1');
+    v_test_name := 'Column existence: google_accounts.name';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'name';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.name does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
-SELECT 'RELATIONSHIP A (license->auth_account valid)' AS test_category,
-       CASE WHEN EXISTS (SELECT 1 FROM licenses WHERE linked_account_id = 'test-sub-1') THEN 'PASS' ELSE 'FAIL' END AS result;
+    v_test_name := 'Column existence: google_accounts.created_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'created_at';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.created_at does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- B. A license cannot reference a nonexistent auth account.
-SELECT 'RELATIONSHIP B (license->auth_account invalid rejected)' AS test_category,
-       CASE 
-         WHEN NOT EXISTS (SELECT 1 FROM licenses WHERE linked_account_id = 'nonexistent-sub')
-         THEN 'PASS' ELSE 'FAIL' END AS result;
+    v_test_name := 'Column existence: google_accounts.last_login_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'last_login_at';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.last_login_at does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- Cleanup for next tests
-DELETE FROM licenses WHERE code_lookup = 'test-lookup-1';
-DELETE FROM auth_accounts WHERE google_sub = 'test-sub-1';
+    -- 3. PRIMARY KEY VALIDATION
+    v_test_name := 'Primary key: google_accounts (google_sub)';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+        AND constraint_type = 'PRIMARY KEY';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key constraint missing on google_accounts';
+        END IF;
+        
+        -- Verify it's on google_sub column
+        PERFORM 1 FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+            AND constraint_type = 'PRIMARY KEY'
+        ) AND column_name = 'google_sub';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key on google_accounts is not on google_sub column';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Primary key exists on correct column');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- C. A token cannot reference a nonexistent license.
-INSERT INTO licenses (id, code_lookup, code_salt, code_hash, status)
-VALUES (gen_random_uuid(), 'test-lookup-2', 'salt2', 'hash2', 'active');
+    v_test_name := 'Primary key: licenses (id)';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'licenses' 
+        AND constraint_type = 'PRIMARY KEY';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key constraint missing on licenses';
+        END IF;
+        
+        -- Verify it's on id column
+        PERFORM 1 FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'licenses' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'licenses' 
+            AND constraint_type = 'PRIMARY KEY'
+        ) AND column_name = 'id';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key on licenses is not on id column';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Primary key exists on correct column');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
-SELECT 'RELATIONSHIP C (token->license invalid rejected)' AS test_category,
-       CASE 
-         WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- FK will reject on actual insert
+    v_test_name := 'Composite primary key: license_installations (license_id, installation_id)';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'license_installations' 
+        AND constraint_type = 'PRIMARY KEY';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key constraint missing on license_installations';
+        END IF;
+        
+        -- Verify it's composite on license_id and installation_id
+        PERFORM COUNT(*) FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'license_installations' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'license_installations' 
+            AND constraint_type = 'PRIMARY KEY'
+        );
+        IF NOT FOUND OR COUNT <> 2 THEN
+            RAISE EXCEPTION 'Primary key on license_installations is not composite or missing columns';
+        END IF;
+        
+        -- Check both columns are part of the PK
+        PERFORM 1 FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'license_installations' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'license_installations' 
+            AND constraint_type = 'PRIMARY KEY'
+        ) AND column_name IN ('license_id', 'installation_id');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Primary key on license_installations missing required columns';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Composite primary key exists on correct columns');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
-DELETE FROM licenses WHERE code_lookup = 'test-lookup-2';
+    -- 4. FOREIGN KEY VALIDATION
+    v_test_name := 'Foreign key: licenses.owner_google_sub -> google_accounts.google_sub';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'licenses' 
+        AND constraint_type = 'FOREIGN KEY';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Foreign key constraint missing on licenses.owner_google_sub';
+        END IF;
+        
+        -- Verify it references google_accounts.google_sub
+        PERFORM 1 FROM information_schema.key_column_usage kcu
+        JOIN information_schema.referential_constraints rc ON kcu.constraint_name = rc.constraint_name
+        JOIN information_schema.table_constraints tc ON rc.unique_constraint_name = tc.constraint_name
+        WHERE kcu.table_schema = 'public' AND kcu.table_name = 'licenses' AND kcu.column_name = 'owner_google_sub'
+        AND tc.table_name = 'google_accounts';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Foreign key on licenses.owner_google_sub does not reference google_accounts.google_sub';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key exists and references correct table/column');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- D. An install cannot reference a nonexistent license.
-SELECT 'RELATIONSHIP D (install->license invalid rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- FK will reject on actual insert
+    -- 5. UNIQUE CONSTRAINT VALIDATION
+    v_test_name := 'Unique constraint: licenses.code_lookup';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'licenses' 
+        AND constraint_type = 'UNIQUE';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Unique constraint missing on licenses.code_lookup';
+        END IF;
+        
+        -- Verify it's on code_lookup column
+        PERFORM 1 FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'licenses' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'licenses' 
+            AND constraint_type = 'UNIQUE'
+        ) AND column_name = 'code_lookup';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Unique constraint on licenses is not on code_lookup column';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Unique constraint exists on correct column');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- E. An event cannot reference a nonexistent license.
-SELECT 'RELATIONSHIP E (event->license invalid rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- FK will reject on actual insert
+    v_test_name := 'Unique constraint: google_accounts.google_sub';
+    BEGIN
+        PERFORM 1 FROM information_schema.table_constraints 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+        AND constraint_type = 'UNIQUE';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Unique constraint missing on google_accounts.google_sub';
+        END IF;
+        
+        -- Verify it's on google_sub column (note: this might be covered by PK, but checking explicitly)
+        PERFORM 1 FROM information_schema.key_column_usage 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+        AND constraint_name = (
+            SELECT constraint_name FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+            AND constraint_type = 'UNIQUE'
+        ) AND column_name = 'google_sub';
+        IF NOT FOUND THEN
+            -- If no explicit unique constraint, check if PK serves this purpose (acceptable)
+            PERFORM 1 FROM information_schema.table_constraints 
+            WHERE table_schema = 'public' AND table_name = 'google_accounts' 
+            AND constraint_type = 'PRIMARY KEY';
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'No unique or primary key constraint on google_accounts.google_sub';
+            END IF;
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Unique constraint exists (explicit or via PK)');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- F. A session cannot reference a nonexistent auth account.
-SELECT 'RELATIONSHIP F (session->auth_account invalid rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- FK will reject on actual insert
+    -- 6. CHECK CONSTRAINT VALIDATION
+    v_test_name := 'Check constraint: licenses.status valid values';
+    BEGIN
+        PERFORM 1 FROM information_schema.check_constraints 
+        WHERE constraint_schema = 'public' 
+        AND constraint_name = 'licenses_status_check';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Check constraint licenses_status_check does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Check constraint exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- G. A Drive grant cannot reference a nonexistent auth account.
-SELECT 'RELATIONSHIP G (drive_grant->auth_account invalid rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- FK will reject on actual insert
+    -- 7. NOT NULL VALIDATION
+    v_test_name := 'Not null: licenses.code_lookup';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'licenses' AND column_name = 'code_lookup' 
+        AND is_nullable = 'NO';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column licenses.code_lookup is not NOT NULL';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column is NOT NULL');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- H. Duplicate license code lookup is rejected.
-INSERT INTO licenses (code_lookup, code_salt, code_hash, status)
-VALUES ('dup-lookup', 'salt', 'hash', 'active');
-SELECT 'RELATIONSHIP H (duplicate code_lookup rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- UNIQUE will reject
-DELETE FROM licenses WHERE code_lookup = 'dup-lookup';
+    v_test_name := 'Not null: licenses.owner_google_sub';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'licenses' AND column_name = 'owner_google_sub' 
+        AND is_nullable = 'NO';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column licenses.owner_google_sub is not NOT NULL';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Column is NOT NULL');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- I. Duplicate Google subject is rejected.
-INSERT INTO auth_accounts (google_sub, email, created_at, last_login_at)
-VALUES ('dup-sub', 'dup@example.com', now(), now());
-SELECT 'RELATIONSHIP I (duplicate google_sub rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- PK will reject
-DELETE FROM auth_accounts WHERE google_sub = 'dup-sub';
+    -- 8. INDEX VALIDATION (comprehensive)
+    -- Check that redundant indexes are absent
+    v_test_name := 'Index absence: idx_licenses_code_lookup (redundant)';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'licenses' AND indexname = 'idx_licenses_code_lookup';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Redundant index idx_licenses_code_lookup should not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Redundant index correctly absent');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- J. Duplicate license + install combination is rejected.
-INSERT INTO licenses (code_lookup, code_salt, code_hash, status)
-VALUES ('dup-install-lookup', 'salt', 'hash', 'active') RETURNING id;
-INSERT INTO license_installs (license_id, install_id) VALUES ((SELECT id FROM licenses WHERE code_lookup = 'dup-install-lookup'), 'install-1');
-SELECT 'RELATIONSHIP J (duplicate license+install rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- PK will reject
-DELETE FROM license_installs WHERE install_id = 'install-1';
-DELETE FROM licenses WHERE code_lookup = 'dup-install-lookup';
+    v_test_name := 'Index absence: idx_license_installations_license (redundant)';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'license_installations' AND indexname = 'idx_license_installations_license';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Redundant index idx_license_installations_license should not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Redundant index correctly absent');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- K. Invalid license status is rejected.
-SELECT 'RELATIONSHIP K (invalid status rejected)' AS test_category,
-       CASE WHEN 1 = 1 THEN 'PASS' ELSE 'FAIL' END AS result; -- CHECK will reject
+    -- Check that all required explicit indexes exist
+    v_test_name := 'Index existence: idx_licenses_owner';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'licenses' AND indexname = 'idx_licenses_owner';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_licenses_owner does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- L. Public/anon access cannot read sensitive backend tables.
-SELECT 'SECURITY L (anon cannot read licenses)' AS test_category,
-       CASE 
-         WHEN NOT EXISTS (
-           SELECT 1 FROM pg_policies 
-           WHERE schemaname = 'public' AND tablename = 'licenses' 
-           AND 'anon' = ANY(roles) AND cmd IN ('SELECT', 'ALL') AND qual != 'false'
-         ) THEN 'PASS' ELSE 'FAIL' END AS result;
+    v_test_name := 'Index existence: idx_licenses_status_created';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'licenses' AND indexname = 'idx_licenses_status_created';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_licenses_status_created does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
-SELECT 'SECURITY L (anon cannot read auth_accounts)' AS test_category,
-       CASE 
-         WHEN NOT EXISTS (
-           SELECT 1 FROM pg_policies 
-           WHERE schemaname = 'public' AND tablename = 'auth_accounts' 
-           AND 'anon' = ANY(roles) AND cmd IN ('SELECT', 'ALL') AND qual != 'false'
-         ) THEN 'PASS' ELSE 'FAIL' END AS result;
+    v_test_name := 'Index existence: idx_license_tokens_license';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'license_tokens' AND indexname = 'idx_license_tokens_license';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_license_tokens_license does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- M. Public/anon access cannot mutate sensitive backend tables.
-SELECT 'SECURITY M (anon cannot insert licenses)' AS test_category,
-       CASE 
-         WHEN NOT EXISTS (
-           SELECT 1 FROM pg_policies 
-           WHERE schemaname = 'public' AND tablename = 'licenses' 
-           AND 'anon' = ANY(roles) AND cmd IN ('INSERT', 'ALL') AND qual != 'false'
-         ) THEN 'PASS' ELSE 'FAIL' END AS result;
+    v_test_name := 'Index existence: idx_license_tokens_revoked';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'license_tokens' AND indexname = 'idx_license_tokens_revoked';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_license_tokens_revoked does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- N. Service-role backend access can perform required operations.
--- (This is tested by application wiring, not by SQL. Service role bypasses RLS.)
+    v_test_name := 'Index existence: idx_license_events_license_time';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'license_events' AND indexname = 'idx_license_events_license_time';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_license_events_license_time does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 12. TIMESTAMP BEHAVIOR
--- =============================================================================
-SELECT 'TIMESTAMP CHECK' AS test_category,
-       column_name || ' default: ' || column_default AS target,
-       CASE WHEN column_default ILIKE '%now()%' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.columns
-WHERE table_schema = 'public' AND table_name IN (
-    'licenses', 'license_tokens', 'license_installs', 'license_events',
-    'auth_accounts', 'auth_sessions', 'drive_grants'
-) AND column_default ILIKE '%now()%'
-ORDER BY table_name, column_name;
+    v_test_name := 'Index existence: idx_login_sessions_google_sub';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'login_sessions' AND indexname = 'idx_login_sessions_google_sub';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_login_sessions_google_sub does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 13. COMPOSITE INSTALL IDENTITY
--- =============================================================================
-SELECT 'COMPOSITE PK CHECK' AS test_category,
-       'license_installs (license_id, install_id)' AS target,
-       CASE WHEN constraint_type = 'PRIMARY KEY' THEN 'PASS' ELSE 'FAIL' END AS result
-FROM information_schema.table_constraints
-WHERE table_schema = 'public' AND table_name = 'license_installs' AND constraint_type = 'PRIMARY KEY';
+    v_test_name := 'Index existence: idx_login_sessions_expires';
+    BEGIN
+        PERFORM 1 FROM pg_indexes 
+        WHERE schemaname = 'public' AND tablename = 'login_sessions' AND indexname = 'idx_login_sessions_expires';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Required index idx_login_sessions_expires does not exist';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Required index exists');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- 14. NO CUSTOMER OPERATIONAL DATA TABLES
--- =============================================================================
-SELECT 'NO STORE DATA TABLES' AS test_category,
-       table_name AS target,
-       'FAIL - unexpected table' AS result
-FROM information_schema.tables
-WHERE table_schema = 'public' AND table_name IN (
-    'products', 'sales', 'sale_items', 'inventory', 'stock_batches',
-    'suppliers', 'supplier_invoices', 'supplier_payments', 'settings', 'backups',
-    'reports', 'invoices', 'customers', 'categories', 'brands', 'units'
-);
+    -- 9. TIMESTAMP / DEFAULT VALIDATION
+    v_test_name := 'Default validation: google_accounts.created_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'created_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.created_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
 
--- =============================================================================
--- SUMMARY
--- =============================================================================
-SELECT '=== VALIDATION COMPLETE ===' AS summary;
+    v_test_name := 'Default validation: google_accounts.last_login_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'google_accounts' AND column_name = 'last_login_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column google_accounts.last_login_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: licenses.created_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'licenses' AND column_name = 'created_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column licenses.created_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: license_tokens.created_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'license_tokens' AND column_name = 'created_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column license_tokens.created_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: license_installations.first_seen_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'license_installations' AND column_name = 'first_seen_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column license_installations.first_seen_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: license_installations.last_seen_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'license_installations' AND column_name = 'last_seen_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column license_installations.last_seen_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: license_events.occurred_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'license_events' AND column_name = 'occurred_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column license_events.occurred_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: login_sessions.created_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'login_sessions' AND column_name = 'created_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column login_sessions.created_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: drive_grants.granted_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'drive_grants' AND column_name = 'granted_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column drive_grants.granted_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'Default validation: drive_grants.updated_at';
+    BEGIN
+        PERFORM 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = 'drive_grants' AND column_name = 'updated_at'
+        AND column_default IS NOT NULL AND column_default LIKE '%now()%';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Column drive_grants.updated_at missing now() default';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Default is now()');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- 10. CONSTRAINT VIOLATION TESTS (qual proper exception handling)
+    
+    -- A. Valid license -> google_accounts FK
+    v_test_name := 'Valid FK: license -> google_accounts';
+    BEGIN
+        -- Create test google account
+        INSERT INTO google_accounts (google_sub, email, name) 
+        VALUES (v_test_google_sub, 'test@example.com', 'Test User');
+        
+        -- Create valid license referencing it
+        INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+        VALUES (gen_random_uuid(), v_test_google_sub, v_test_license_code, 'active')
+        RETURNING id INTO v_test_license_id;
+        
+        -- Verify relationship exists
+        PERFORM 1 FROM licenses l 
+        JOIN google_accounts ga ON l.owner_google_sub = ga.google_sub
+        WHERE l.id = v_test_license_id AND ga.google_sub = v_test_google_sub;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Valid license-google_accounts relationship not found';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Valid relationship created and verified');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- B. Invalid license -> google_accounts FK
+    v_test_name := 'Invalid FK: license -> google_accounts (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license with nonexistent google_sub
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), 'nonexistent_sub_12345', 'invalid_code_123', 'active');
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- C. Invalid license_token -> license FK
+    v_test_name := 'Invalid FK: license_token -> license (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license_token with nonexistent license_id
+            INSERT INTO license_tokens (license_id, token_hash, token_type, expires_at) 
+            VALUES (gen_random_uuid(), 'hash123', 'Bearer', NOW() + INTERVAL '1 hour');
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- D. Invalid installation -> license FK
+    v_test_name := 'Invalid FK: license_installation -> license (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license_installation with nonexistent license_id
+            INSERT INTO license_installations (license_id, installation_id) 
+            VALUES (gen_random_uuid(), 'test_installation_123');
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- E. Invalid license_event -> license FK
+    v_test_name := 'Invalid FK: license_event -> license (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license_event with nonexistent license_id
+            INSERT INTO license_events (license_id, event_type, event_data) 
+            VALUES (gen_random_uuid(), 'created', '{}'::jsonb);
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- F. Invalid login_session -> google_accounts FK
+    v_test_name := 'Invalid FK: login_session -> google_accounts (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert login_session with nonexistent google_sub
+            INSERT INTO login_sessions (google_sub, session_token, expires_at) 
+            VALUES ('nonexistent_sub_67890', 'token123', NOW() + INTERVAL '1 day');
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- G. Invalid drive_grant -> google_accounts FK
+    v_test_name := 'Invalid FK: drive_grant -> google_accounts (nonexistent parent)';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert drive_grant with nonexistent google_sub
+            INSERT INTO drive_grants (google_sub, drive_folder_id, access_token) 
+            VALUES ('nonexistent_sub_abcde', 'folder123', 'token123');
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Foreign key violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- H. Duplicate license code_lookup
+    v_test_name := 'Unique violation: duplicate licenses.code_lookup';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create first license with test code
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub, v_test_license_code, 'active');
+            
+            -- Attempt to insert duplicate code_lookup
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub, v_test_license_code, 'active');
+            EXCEPTION
+                WHEN unique_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected unique violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Unique violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- I. Duplicate google_sub
+    v_test_name := 'Unique violation: duplicate google_accounts.google_sub';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create first google account
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub, 'test1@example.com', 'Test User 1');
+            
+            -- Attempt to insert duplicate google_sub
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub, 'test2@example.com', 'Test User 2');
+            EXCEPTION
+                WHEN unique_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected unique violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Unique violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- J. Duplicate license_installations composite PK
+    v_test_name := 'Unique violation: duplicate license_installations composite PK';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test license
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub, 'unique_code_for_install', 'active')
+            RETURNING id INTO v_test_license_id;
+            
+            -- Create first installation
+            INSERT INTO license_installations (license_id, installation_id) 
+            VALUES (v_test_license_id, v_test_installation_id);
+            
+            -- Attempt to insert duplicate composite PK
+            INSERT INTO license_installations (license_id, installation_id) 
+            VALUES (v_test_license_id, v_test_installation_id);
+            EXCEPTION
+                WHEN unique_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected unique violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Unique violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- K. Invalid license status
+    v_test_name := 'Check violation: invalid licenses.status';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license with invalid status
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub, 'invalid_status_code', 'invalid_status');
+            EXCEPTION
+                WHEN check_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected check violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Check violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- L. NOT NULL violation (at least one)
+    v_test_name := 'Not null violation: licenses.code_lookup';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Attempt to insert license with NULL code_lookup
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub, NULL, 'active');
+            EXCEPTION
+                WHEN not_null_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected not null violation but insert succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'Not null violation properly raised');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- 11. ON DELETE TESTS
+    
+    -- RESTRICT for required relationships (should prevent deletion)
+    v_test_name := 'ON DELETE RESTRICT: licenses -> google_accounts';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test data
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub || '_restrict', 'restrict@example.com', 'Restrict Test');
+            
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub || '_restrict', 'restrict_code', 'active')
+            RETURNING id INTO v_test_license_id;
+            
+            -- Attempt to delete referenced google account
+            DELETE FROM google_accounts WHERE google_sub = v_test_google_sub || '_restrict';
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation on delete but delete succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE RESTRICT working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- RESTRICT: license_tokens.license_id -> licenses.id
+    v_test_name := 'ON DELETE RESTRICT: license_tokens -> licenses';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test data: google_account -> license -> token
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub || '_token_r', 'token@example.com', 'Token Test');
+            
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub || '_token_r', 'token_code', 'active')
+            RETURNING id INTO v_test_license_id;
+            
+            INSERT INTO license_tokens (license_id, token_hash, token_type, expires_at) 
+            VALUES (v_test_license_id, 'tokenhash123', 'Bearer', NOW() + INTERVAL '1 hour');
+            
+            -- Attempt to delete referenced license
+            DELETE FROM licenses WHERE id = v_test_license_id;
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation on delete but delete succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE RESTRICT working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- RESTRICT: license_installations.license_id -> licenses.id
+    v_test_name := 'ON DELETE RESTRICT: license_installations -> licenses';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test data: google_account -> license -> installation
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub || '_inst_r', 'inst@example.com', 'Installation Test');
+            
+            INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+            VALUES (gen_random_uuid(), v_test_google_sub || '_inst_r', 'inst_code', 'active')
+            RETURNING id INTO v_test_license_id;
+            
+            INSERT INTO license_installations (license_id, installation_id) 
+            VALUES (v_test_license_id, v_test_installation_id || '_inst');
+            
+            -- Attempt to delete referenced license
+            DELETE FROM licenses WHERE id = v_test_license_id;
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation on delete but delete succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE RESTRICT working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- RESTRICT: login_sessions.google_sub -> google_accounts.google_sub
+    v_test_name := 'ON DELETE RESTRICT: login_sessions -> google_accounts';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test data: google_account -> login_session
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub || '_sess_r', 'sess@example.com', 'Session Test');
+            
+            INSERT INTO login_sessions (google_sub, session_token, expires_at) 
+            VALUES (v_test_google_sub || '_sess_r', 'sess_token123', NOW() + INTERVAL '1 day');
+            
+            -- Attempt to delete referenced google account
+            DELETE FROM google_accounts WHERE google_sub = v_test_google_sub || '_sess_r';
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation on delete but delete succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE RESTRICT working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- RESTRICT: drive_grants.google_sub -> google_accounts.google_sub
+    v_test_name := 'ON DELETE RESTRICT: drive_grants -> google_accounts';
+    BEGIN
+        v_exception_occurred := FALSE;
+        BEGIN
+            -- Create test data: google_account -> drive_grant
+            INSERT INTO google_accounts (google_sub, email, name) 
+            VALUES (v_test_google_sub || '_drive_r', 'drive@example.com', 'Drive Test');
+            
+            INSERT INTO drive_grants (google_sub, refresh_cipher, scopes, granted_at, updated_at) 
+            VALUES (v_test_google_sub || '_drive_r', 'cipher123', 'scope1', now(), now());
+            
+            -- Attempt to delete referenced google account
+            DELETE FROM google_accounts WHERE google_sub = v_test_google_sub || '_drive_r';
+            EXCEPTION
+                WHEN foreign_key_violation THEN
+                    v_exception_occurred := TRUE;
+                    GET STACKED DIAGNOSTICS v_exception_sqlstate = RETURNED_SQLSTATE, 
+                                              v_exception_message = MESSAGE_TEXT;
+        END;
+        
+        IF NOT v_exception_occurred THEN
+            RAISE EXCEPTION 'Expected foreign key violation on delete but delete succeeded';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE RESTRICT working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- SET NULL for license_events.license_id
+    v_test_name := 'ON DELETE SET NULL: license_events.license_id';
+    BEGIN
+        -- Create test license
+        INSERT INTO licenses (id, owner_google_sub, code_lookup, status) 
+        VALUES (gen_random_uuid(), v_test_google_sub, 'setnull_code', 'active')
+        RETURNING id INTO v_test_license_id;
+        
+        -- Create license_event referencing it
+        INSERT INTO license_events (license_id, event_type, event_data) 
+        VALUES (v_test_license_id, 'test_event', '{}'::jsonb);
+        
+        -- Verify license_id is set before delete
+        PERFORM 1 FROM license_events WHERE license_id = v_test_license_id;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'License event not found before delete test';
+        END IF;
+        
+        -- Delete the license
+        DELETE FROM licenses WHERE id = v_test_license_id;
+        
+        -- Verify license_id is now NULL in license_events
+        PERFORM 1 FROM license_events WHERE license_id IS NULL AND event_type = 'test_event';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'License event license_id was not set to NULL after delete';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'ON DELETE SET NULL working properly');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- 12. CLEANUP TEST DATA
+    v_test_name := 'Cleanup: Remove test data';
+    BEGIN
+        -- Delete in reverse order to avoid FK issues
+        DELETE FROM license_events WHERE license_id = v_test_license_id;
+        DELETE FROM license_installations WHERE license_id = v_test_license_id;
+        DELETE FROM license_tokens WHERE license_id = v_test_license_id;
+        DELETE FROM licenses WHERE owner_google_sub LIKE '__phase1_validation_%';
+        DELETE FROM google_accounts WHERE google_sub LIKE '__phase1_validation_%';
+        DELETE FROM login_sessions WHERE google_sub LIKE '__phase1_validation_%';
+        DELETE FROM drive_grants WHERE google_sub LIKE '__phase1_validation_%';
+        
+        CALL record_test(v_test_name, TRUE, 'Test data cleaned up');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- 13. FINAL VERIFICATION: No test rows remaining
+    v_test_name := 'Verification: No test rows remaining';
+    BEGIN
+        -- Check for any remaining test data
+        PERFORM 1 FROM google_accounts WHERE google_sub LIKE '__phase1_validation_%';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test google_accounts rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM licenses WHERE owner_google_sub LIKE '__phase1_validation_%';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test licenses rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM license_tokens WHERE license_id IN (
+            SELECT id FROM licenses WHERE owner_google_sub LIKE '__phase1_validation_%'
+        );
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test license_tokens rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM license_installations WHERE license_id IN (
+            SELECT id FROM licenses WHERE owner_google_sub LIKE '__phase1_validation_%'
+        );
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test license_installations rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM license_events WHERE license_id IN (
+            SELECT id FROM licenses WHERE owner_google_sub LIKE '__phase1_validation_%'
+        );
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test license_events rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM login_sessions WHERE google_sub LIKE '__phase1_validation_%';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test login_sessions rows remain after cleanup';
+        END IF;
+        
+        PERFORM 1 FROM drive_grants WHERE google_sub LIKE '__phase1_validation_%';
+        IF FOUND THEN
+            RAISE EXCEPTION 'Test drive_grants rows remain after cleanup';
+        END IF;
+        
+        CALL record_test(v_test_name, TRUE, 'No test rows remaining');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- 14. RLS VALIDATION
+    -- Check RLS enabled on all seven tables
+    v_test_name := 'RLS: Enabled on google_accounts';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'google_accounts' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on google_accounts';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on licenses';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'licenses' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on licenses';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on license_tokens';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'license_tokens' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on license_tokens';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on license_installations';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'license_installations' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on license_installations';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on license_events';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'license_events' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on license_events';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on login_sessions';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'login_sessions' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on login_sessions';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS: Enabled on drive_grants';
+    BEGIN
+        PERFORM 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'drive_grants' AND rowsecurity = true;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'RLS not enabled on drive_grants';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'RLS enabled');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- RLS Policies: deny all for anon and authenticated on each table
+    -- We'll check each table for both anon and authenticated policies that restrict access
+    -- Helper function to check policy exists and is restrictive (FIXED)
+    CREATE OR REPLACE FUNCTION check_restrictive_policy(p_scheme TEXT, p_table TEXT, p_role TEXT)
+RETURNS SETOF INTEGER
+LANGUAGE plpgsql
+AS $proc$
+BEGIN
+    RETURN QUERY
+    SELECT 1
+    FROM pg_policies
+    WHERE schemaname = p_scheme
+      AND tablename = p_table
+      AND (roles IS NULL OR roles = '{}' OR p_role = ANY(roles))
+      AND qual = 'false'
+      AND with_check = 'false';
+END;
+$proc$;
+    -- Now test each table for anon and authenticated
+    -- We'll do a series of tests
+    v_test_name := 'RLS Policy: anon has no access on google_accounts';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'google_accounts', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on google_accounts';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on google_accounts';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'google_accounts', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on google_accounts';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on licenses';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'licenses', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on licenses';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on licenses';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'licenses', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on licenses';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on license_tokens';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_tokens', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on license_tokens';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on license_tokens';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_tokens', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on license_tokens';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on license_installations';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_installations', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on license_installations';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on license_installations';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_installations', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on license_installations';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on license_events';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_events', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on license_events';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on license_events';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'license_events', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on license_events';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on login_sessions';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'login_sessions', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on login_sessions';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on login_sessions';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'login_sessions', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on login_sessions';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: anon has no access on drive_grants';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'drive_grants', 'anon');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for anon on drive_grants';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Anon access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    v_test_name := 'RLS Policy: authenticated has no access on drive_grants';
+    BEGIN
+        PERFORM check_restrictive_policy('public', 'drive_grants', 'authenticated');
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'No restrictive policy found for authenticated on drive_grants';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'Authenticated access properly restricted');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+
+    -- 15. ABSENCE OF OPERATIONAL STORE TABLES
+    v_test_name := 'Absence: No operational store tables';
+    BEGIN
+        -- Check that tables like products, orders, etc. don't exist (they shouldn't in Phase 1)
+        PERFORM 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name IN ('products', 'orders', 'order_items', 'inventory', 'stores');
+        IF FOUND THEN
+            RAISE EXCEPTION 'Operational store tables found that should not exist in Phase 1';
+        END IF;
+        CALL record_test(v_test_name, TRUE, 'No operational store tables present');
+    EXCEPTION WHEN OTHERS THEN
+        CALL record_test(v_test_name, FALSE, SQLERRM);
+    END;
+    
+    -- Get final counts from the temporary table
+    SELECT passed, failed, total INTO v_passed, v_failed, v_total FROM test_counters;
+    -- Final Summary
+    RAISE NOTICE '----------------------------------------';
+    RAISE NOTICE 'PHASE 1 VALIDATION SUMMARY';
+    RAISE NOTICE '----------------------------------------';
+    RAISE NOTICE 'PASSED: %', v_passed;
+    RAISE NOTICE 'FAILED: %', v_failed;
+    RAISE NOTICE 'TOTAL: %', v_total;
+    IF v_failed = 0 THEN
+        RAISE NOTICE 'OVERALL RESULT: PASS';
+    ELSE
+        RAISE NOTICE 'OVERALL RESULT: FAIL';
+    END IF;
+    
+END $$;

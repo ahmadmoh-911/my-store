@@ -48,6 +48,10 @@ function readPepper(env) {
  *   databaseFile: string,
  *   scrypt: {N: number, r: number, p: number, keylen: number},
  *   useMemoryDb: boolean,
+ *   supabaseUrl: string|null,
+ *   supabaseDbUrl: string|null,
+ *   supabaseServiceRoleKey: string|null,
+ *   usePostgres: boolean,
  * }}
  */
 export function loadConfig(env = process.env) {
@@ -63,6 +67,11 @@ export function loadConfig(env = process.env) {
     // ':memory:' is opt-in for tests.
     databaseFile: env.STOREHUB_DB || './data/storehub.db',
     useMemoryDb: memory,
+
+    supabaseUrl: env.SUPABASE_URL || null,
+    supabaseDbUrl: env.SUPABASE_DB_URL || null,
+    supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || null,
+    usePostgres: !!(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) || !!env.SUPABASE_DB_URL,
 
     /**
      * scrypt work factors.

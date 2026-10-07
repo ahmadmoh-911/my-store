@@ -9,7 +9,7 @@ import { icon } from '../icons.js';
 import {
   el, fromHTML, clear, moneyHTML, numInt, escapeHTML,
 } from '../utils.js';
-import { getProduct, stockOf } from '../db.js';
+import { get, stockOf, STORES } from '../db.js';
 import { navigate } from '../router.js';
 import { pageHead, emptyState, toast } from '../components.js';
 
@@ -35,7 +35,7 @@ export function render(params = []) {
 
 async function boot(host, id) {
   const [product, settings] = await Promise.all([
-    getProduct(id),
+    get(STORES.products, id),
     (await import('../db.js')).getSettings(),
   ]);
 
