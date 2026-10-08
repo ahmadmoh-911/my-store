@@ -10,10 +10,10 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test",
+    "test:live": "node scripts/pg-live.mjs",
     "issue": "node scripts/issue-license.mjs"
   },
   "dependencies": {
-    "deasync": "^0.1.31",
     "pg": "^8.23.1"
   }
 }

@@ -10,46 +10,29 @@
  * auth, or Drive beyond what is required to implement the repository methods.
  */
  
-const { createSupabaseClient } = require('./pg.js');
-const { createAuthRepository } = require('./auth-repository.js');
+import { createSupabaseClient, createPgDatabaseAdapter } from './pg.js';
+import { createAuthRepository } from './auth-repository.js';
 
 /**
- * Opens a PostgreSQL auth database.
+ * Opens the PostgreSQL auth database.
  *
  * @param {string} file - Ignored for PostgreSQL (kept for compatibility)
- * @param {{clock: () => number, pepper: string, config: object}} deps
+ * @param {{clock: () => number, pepper: string, config?: object, pgClient?: object}} deps
  * @returns {{db: object, repo: AuthRepository}}
  */
 export async function openAuthDatabase(file, deps = {}) {
-   const { clock, pepper, config } = deps;
+   const { clock, pepper, config, pgClient } = deps;
    if (!config) {
       throw new Error('Config is required for PostgreSQL adapter');
    }
-   const pgClient = createSupabaseClient(config);
+   // One shared pool: index.js hands the client in. A standalone caller without
+   // one is the only case that creates its own.
+   const pgClient_ = pgClient || createSupabaseClient(config);
 
-   // Create a db object that mimics the shape expected by createAuthRepository
-   const db = {
-      prepare(sql) {
-         return {
-            run(params) {
-               pgClient.exec(sql, params);
-            },
-            get(params) {
-               const result = pgClient.query(sql, params);
-               return result[0] || null;
-            },
-            all(params) {
-               return pgClient.query(sql, params);
-            },
-         };
-      },
-      exec(sql, params) {
-         pgClient.exec(sql, params);
-      },
-      close() {
-         pgClient.close();
-      },
-   };
+   // A db object matching the shape createAuthRepository expects. The adapter
+   // performs the SQLite→PostgreSQL translation (named parameters, `BEGIN
+   // IMMEDIATE` → real single-connection transaction) transparently.
+   const db = createPgDatabaseAdapter(pgClient_);
 
    const repo = createAuthRepository(db, { clock, pepper });
    return { db, repo };
