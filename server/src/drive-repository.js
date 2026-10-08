@@ -115,9 +115,10 @@ export function openGrant(key, sealed) {
 // entry point, and the runtime is PostgreSQL-only.
 
 /**
- * Builds the grant repository (the port) over a SQLite handle.
+ * Builds the grant repository (the port) over a database handle.
  *
- * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} db duck-typed handle from the PostgreSQL adapter (runtime) or
+ *   the test-only SQLite adapter (tests) — never a SQLite driver in the runtime
  * @param {{clock?: () => number, pepper: string}} deps
  */
 export function createDriveRepository(db, { clock, pepper }) {

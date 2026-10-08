@@ -325,8 +325,10 @@ Honest about what is not production-ready, rather than implying it is.
 4. **The PKCE store is in-process.** `pkceStore` is a `Map`. A single instance is
    fine; running two or more behind a load balancer needs a shared store. This is
    inherited from Phase 3 and applies to the customer flow equally.
-5. **SQLite is a file.** Fine for one backend instance; a hosted database is a new
-   adapter behind the repository port, not a rewrite.
+5. **One hosted database.** Since Phase 4 the runtime is PostgreSQL-only —
+   SQLite and every local file-path setting were removed, and the server fails
+   fast without `SUPABASE_DB_URL`. Running several instances means pooling
+   against that database behind the same repository ports, not a rewrite.
 6. **Rate limiting covers the licence endpoints only.** Admin routes are
    authenticated and allowlisted, so the abuse surface is a compromised
    administrator account rather than an anonymous one.

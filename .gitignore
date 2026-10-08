@@ -14,7 +14,9 @@ Thumbs.db
 !.env.example
 temp/
 
-# Backend runtime databases (SQLite with WAL mode)
+# Retired backend runtime databases (SQLite was removed in Phase 4 — the
+# runtime writes no database file; these rules only keep stray *.db artifacts
+# from ever being committed)
 server/data/
 *.db
 *.db-wal

@@ -1,10 +1,11 @@
 /**
  * Authentication repository: sessions and Google account identity.
  *
- * This is the *port* — a small set of named operations. The SQLite adapter
- * implements it against `node:sqlite`. The service layer knows only this
- * interface, so the storage can be swapped for Postgres later without touching
- * business logic.
+ * This is the *port* — a small set of named operations. The PostgreSQL adapter
+ * in ./pg-auth-repository.js implements it in the runtime; the test-only SQLite
+ * adapter in ../test/support/sqlite-auth.js implements it under test. The
+ * service layer knows only this interface, so storage is an adapter choice and
+ * never touches business logic.
  */
 
 import { randomBytes, createHmac, createHash } from 'node:crypto';
@@ -84,7 +85,8 @@ function toSessionRecord(row) {
 /**
  * Creates the authentication repository.
  *
- * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} db duck-typed handle from the PostgreSQL adapter (runtime) or
+ *   the test-only SQLite adapter (tests) — never a SQLite driver in the runtime
  * @param {{clock: () => number, pepper: string}} deps
  * @returns {AuthRepository}
  */

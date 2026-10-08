@@ -4,7 +4,9 @@
  * This module implements the LicenseRepository interface using a PostgreSQL
  * client. It is used when the backend is configured to use PostgreSQL/Supabase.
  *
- * The adapter follows the same interface as the SQLite adapter in ./sqlite.js
+ * The adapter follows the same interface as the repository port in
+ * ./repository.js (Phase 4: this is the only adapter the runtime loads; the
+ * SQLite variant lives in ../test/support/ for the unit suite).
  * and the repository interface in ./repository.js.
  *
  * It does not contain any business logic and does not know about licences,

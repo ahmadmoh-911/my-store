@@ -5,8 +5,8 @@
  * URI). There is deliberately no fallback that builds a connection string out
  * of `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`: the service role key is an
  * API credential, not the database password, and a silently-wrong fallback is
- * how a backend ends up authenticating with a garbage password while
- * «usePostgres» is on.
+ * how a backend ends up authenticating with a garbage password while the
+ * server claims PostgreSQL is configured.
  *
  * The client exposes synchronous `query` / `exec` / `close` so the repository
  * adapters keep their existing synchronous repository interface. The actual

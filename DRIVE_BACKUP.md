@@ -89,7 +89,7 @@ The Store Hub backend is **not on the data path**. It only brokers the OAuth con
 
 ### Token storage
 
-- **Refresh token**: stored in a dedicated SQLite database `storehub_drive` (separate from `storehub.db` which holds licences + auth accounts/sessions). Schema:
+- **Refresh token**: stored in its own PostgreSQL table `drive_grants`, never beside the `licenses` / `auth_accounts` / `auth_sessions` tables (since Phase 4 there is no local SQLite file at all; before that it was a dedicated `storehub_drive` file for the same separation reason). Schema:
   ```sql
   drive_grants(
     google_sub     TEXT PRIMARY KEY,
@@ -204,7 +204,7 @@ The following must be set in the server environment before Drive works in produc
 | `GOOGLE_AUTH_REDIRECT_URI` | Customer sign-in: `https://your-domain/api/auth/google/callback` |
 | `GOOGLE_ADMIN_REDIRECT_URI` | Admin portal: `https://your-domain/api/admin/auth/callback` |
 | `STOREHUB_PEPPER` | ≥32-byte secret for sealing Drive grants (rotate with care — old grants become unreadable) |
-| `STOREHUB_DRIVE_DB` | Path to the Drive grants database (e.g. `/var/lib/storehub/storehub_drive.db`) |
+| `SUPABASE_DB_URL` | PostgreSQL connection string — the Drive grant lives in the `drive_grants` table (`STOREHUB_DRIVE_DB` was removed in Phase 4 with the SQLite runtime) |
 | `STOREHUB_DRIVE_FOLDER` | Optional folder name override (default: `Store Hub Backups`) |
 | `STOREHUB_DRIVE=0` | Set to disable the feature entirely |
 

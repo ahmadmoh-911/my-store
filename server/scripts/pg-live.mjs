@@ -12,10 +12,10 @@
  *                      node:http server listens on a loopback port, and the
  *                      routes are called over a socket.
  *
- * PostgreSQL-only by construction: this script never opens an SQLite handle and
- * never imports ./helpers.mjs (which does). `node:sqlite` is only ever imported
- * lazily inside the SQLite-only open functions, and the PostgreSQL branch of
- * buildApplication never takes that path because usePostgres is on here.
+ * PostgreSQL-only by construction: this script never opens an SQLite handle,
+ * and since Phase 4 neither does the runtime — `buildApplication()` has no
+ * SQLite branch at all, only the test-only `adapters` seam, which this script
+ * does not use. Nothing from ./test/support is imported here.
  *
  * It reads server/.env via the same config loader as the runtime and connects
  * with `SUPABASE_DB_URL` verbatim. Optional `PG_LIVE_PORT` (default: unset)
@@ -34,7 +34,7 @@ import { createSupabaseClient } from '../src/pg.js';
 import { openLicenseDatabase } from '../src/pg-license-repository.js';
 import { openAuthDatabase } from '../src/pg-auth-repository.js';
 import { openDriveDatabase } from '../src/pg-drive-repository.js';
-// Service + HTTP layers (never ../test/helpers.mjs: that module imports sqlite.js).
+// Service + HTTP layers (never ../test/helpers.mjs: that module is test-only).
 import { createLicenseService } from '../src/service.js';
 import { createAuthService } from '../src/auth-service.js';
 import { createDriveService } from '../src/drive-service.js';
