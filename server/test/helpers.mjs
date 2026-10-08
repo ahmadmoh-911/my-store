@@ -49,7 +49,6 @@ export function createTestService(options = {}) {
   const config = loadConfig({
     NODE_ENV: 'test',
     STOREHUB_PEPPER: TEST_PEPPER,
-    STOREHUB_DB: ':memory:',
     STOREHUB_SCRYPT_N: String(TEST_SCRYPT.N),
     STOREHUB_SCRYPT_R: String(TEST_SCRYPT.r),
     STOREHUB_SCRYPT_P: String(TEST_SCRYPT.p),

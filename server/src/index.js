@@ -6,10 +6,7 @@
  * without starting a socket.
  */
 
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-
-import { loadConfig, assertProductionRedirectUris } from './config.js';
+import { loadConfig, assertProductionRedirectUris, assertPostgresConfigured } from './config.js';
 import { createLicenseService } from './service.js';
 import { createAuthService } from './auth-service.js';
 import { createDriveService } from './drive-service.js';
@@ -20,10 +17,21 @@ import { createLicenseServer } from './http.js';
 /**
  * Builds every service the backend exposes.
  *
- * Async only because opening the identity database loads the SQLite driver; the
- * licence adapter opens synchronously.
+ * Async only because the adapters are loaded dynamically. Without `adapters`
+ * this opens PostgreSQL and nothing else — Phase 4 removed the SQLite runtime,
+ * so there is no local-file path and no fallback: a missing or malformed
+ * SUPABASE_DB_URL fails here, in milliseconds, with `assertPostgresConfigured`.
  *
- * @param {{env?: NodeJS.ProcessEnv}} [options]
+ * `adapters` is a *test-only* seam. The unit suite injects its in-memory
+ * adapters so this wiring graph stays exercised without a live PostgreSQL;
+ * production code never passes it, and with it absent the PostgreSQL path
+ * above is the only one taken.
+ *
+ * @param {{env?: NodeJS.ProcessEnv, adapters?: {
+ *   openLicenseDatabase: Function,
+ *   openAuthDatabase: Function,
+ *   openDriveDatabase: Function,
+ * }}} [options]
  * @returns {Promise<{
  *   config: object,
  *   licenseService: object,
@@ -42,12 +50,20 @@ export async function buildApplication(options = {}) {
    // that can never receive Google's redirect.
    assertProductionRedirectUris(config);
 
-   // Conditionally load database adapters
    let openLicenseDatabase;
    let openAuthDatabase;
    let openDriveDatabase;
    let pgClient = null;
-   if (config.usePostgres) {
+   if (options.adapters) {
+     // Test-only seam (see the JSDoc above). No PostgreSQL client is created:
+     // pgClient stays null and the injected adapters ignore it.
+     ({ openLicenseDatabase, openAuthDatabase, openDriveDatabase } = options.adapters);
+   } else {
+     // Phase 4: PostgreSQL is the only backend. This throws before anything is
+     // opened when SUPABASE_DB_URL is missing, malformed, or not a postgres URL
+     // — there is deliberately no SQLite branch left to fall back to.
+     assertPostgresConfigured(config);
+
      const pgLicense = await import('./pg-license-repository.js');
      const pgAuth = await import('./pg-auth-repository.js');
      const pgDrive = await import('./pg-drive-repository.js');
@@ -59,15 +75,6 @@ export async function buildApplication(options = {}) {
      openLicenseDatabase = pgLicense.openLicenseDatabase;
      openAuthDatabase = pgAuth.openAuthDatabase;
      openDriveDatabase = pgDrive.openDriveDatabase;
-   } else {
-     // TEMPORARY (Phase 4, commit A): SQLite adapters are test-only now;
-     // commit B removes this branch so the runtime opens PostgreSQL only.
-     const sqliteLicense = await import('../test/support/sqlite-license.js');
-     const sqliteAuth = await import('../test/support/sqlite-auth.js');
-     const sqliteDrive = await import('../test/support/sqlite-drive.js');
-     openLicenseDatabase = sqliteLicense.openLicenseDatabase;
-     openAuthDatabase = sqliteAuth.openAuthDatabase;
-     openDriveDatabase = sqliteDrive.openDriveDatabase;
    }
 
    /** @param {string} message @param {unknown} [detail] */
@@ -80,10 +87,6 @@ export async function buildApplication(options = {}) {
        );
      }
    };
-
-   // The database is a plain file, so make sure its directory exists before the
-   // first open rather than surfacing ENOENT as a confusing startup error.
-   if (!config.useMemoryDb) mkdirSync(dirname(config.databaseFile), { recursive: true });
 
    const clock = () => Date.now();
 
@@ -113,24 +116,25 @@ export async function buildApplication(options = {}) {
    // licence one yields undefined and the first request fails with a confusing
    // "cannot read property of undefined" — so the licence repository is used
    // directly here and a test builds this same graph to keep it honest.
-   const licenseRepository = openLicenseDatabase(config.databaseFile, { clock, config, pgClient });
+   //
+   // The leading `null` is the old filesystem-path argument. No path exists any
+   // more (Phase 4): PostgreSQL ignores it, and the test seam closes over its
+   // own file when it needs one.
+   const licenseRepository = openLicenseDatabase(null, { clock, config, pgClient });
    const licenseService = createLicenseService({ repository: licenseRepository, config, clock, log });
 
-   const authDb = await openAuthDatabase(config.databaseFile, {
+   const authDb = await openAuthDatabase(null, {
      clock,
      pepper: config.pepper,
      config,
      pgClient,
    });
 
-   // The Drive grant gets its own database, always. `drive.db` is a *different
-   // file* from `databaseFile`, because it holds a long-lived credential and the
-   // licence file holds none — see ./drive-repository.js for why those must not
-   // share a file.
-   if (!config.useMemoryDb && config.drive.databaseFile !== ':memory:') {
-     mkdirSync(dirname(config.drive.databaseFile), { recursive: true });
-   }
-   const driveDb = await openDriveDatabase(config.drive.databaseFile, {
+   // The Drive grant lives in PostgreSQL, in its own `drive_grants` table and
+   // never beside licence or account rows — a long-lived credential must not
+   // share storage with data whose leak would be less damaging. See
+   // ./drive-repository.js for why those must stay separate.
+   const driveDb = await openDriveDatabase(null, {
      clock,
      pepper: config.pepper,
      config,
@@ -204,8 +208,8 @@ async function main() {
    const address = await listen();
 
    log(`storehub licence backend listening on http://${address.host}:${address.port}`);
-   log(`database ${config.databaseFile}`);
-   log(`drive grants ${config.drive.databaseFile} → "${config.drive.folderName}" in the customer's own Drive`);
+   log(`database postgresql host=${new URL(config.supabaseDbUrl).hostname} (SUPABASE_DB_URL, value not shown)`);
+   log(`drive grants in PostgreSQL table drive_grants → "${config.drive.folderName}" in the customer's own Drive`);
    log(describeAdminConfiguration(config.admin));
 
    if (config.env !== 'production') {
@@ -224,6 +228,13 @@ async function main() {
    };
    process.on('SIGINT', () => shutdown('SIGINT'));
    process.on('SIGTERM', () => shutdown('SIGTERM'));
+   // Windows: a parent process cannot deliver SIGINT to a child console process
+   // reliably (empirically it kills the child without running this handler),
+   // while Ctrl+Break arrives as SIGBREAK every time. The Phase 4 shutdown proof
+   // therefore drives CTRL_BREAK_EVENT; handling it here is what makes "clean
+   // shutdown on signal" testable on this platform. Operational, not business
+   // logic: the same close() runs either way.
+   process.on('SIGBREAK', () => shutdown('SIGBREAK'));
 }
 
 // `import.meta.url === pathToFileURL(process.argv[1])` is the check for "run

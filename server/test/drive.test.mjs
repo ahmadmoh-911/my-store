@@ -548,12 +548,17 @@ test('ISOLATION: posting a backup envelope anywhere changes no database', async 
   const driveFile = path.join(dir, 'drive.db');
 
   const { buildApplication } = await import('../src/index.js');
+  // Phase 4: the runtime opens PostgreSQL only, so the SQLite file adapters are
+  // injected through the test seam. Everything else — config, services, route
+  // handling — is the real wiring, and the two files below are the physical
+  // claim this test is about.
+  const { openLicenseDatabase } = await import('./support/sqlite-license.js');
+  const { openAuthDatabase } = await import('./support/sqlite-auth.js');
+  const { openDriveDatabase } = await import('./support/sqlite-drive.js');
   const app = await buildApplication({
     env: {
       NODE_ENV: 'test',
       STOREHUB_PEPPER: TEST_PEPPER,
-      STOREHUB_DB: licenceFile,
-      STOREHUB_DRIVE_DB: driveFile,
       STOREHUB_SCRYPT_N: '1024',
       STOREHUB_SCRYPT_R: '8',
       STOREHUB_SCRYPT_P: '1',
@@ -563,10 +568,17 @@ test('ISOLATION: posting a backup envelope anywhere changes no database', async 
       STOREHUB_RATE_MAX_ACTIVATE: '1000',
       STOREHUB_RATE_MAX_VERIFY: '1000',
     },
+    adapters: {
+      openLicenseDatabase: (_file, deps) => openLicenseDatabase(licenceFile, deps),
+      openAuthDatabase: (_file, deps) => openAuthDatabase(licenceFile, deps),
+      openDriveDatabase: (_file, deps) => openDriveDatabase(driveFile, deps),
+    },
   });
 
   try {
-    assert.notEqual(app.config.databaseFile, app.config.drive.databaseFile, 'two separate files');
+    assert.ok(fs.existsSync(licenceFile), 'the licence adapter opened its own file');
+    assert.ok(fs.existsSync(driveFile), 'the Drive adapter opened its own file');
+    assert.notEqual(licenceFile, driveFile, 'two separate files');
 
     // A real grant and a real session, created through the app's own wiring —
     // not through a test-only entry point — so the HTTP calls below are the same
@@ -861,37 +873,41 @@ test('FLOW: drive.file means the app can only find its own folder', async () => 
  * ================================================================== */
 
 test('CONFIG: Drive settings are configurable and default to off-the-clock', () => {
-  const base = { NODE_ENV: 'test', STOREHUB_PEPPER: TEST_PEPPER, STOREHUB_DB: ':memory:' };
+  const base = { NODE_ENV: 'test', STOREHUB_PEPPER: TEST_PEPPER };
 
   const defaults = loadConfig(base);
   assert.equal(defaults.drive.folderName, 'Store Hub Backups');
   assert.equal(defaults.drive.enabled, true);
-  assert.equal(
-    defaults.drive.databaseFile,
-    ':memory:',
-    'memory mode covers the Drive database too — a test must not write a real credential store to disk',
-  );
+  // Phase 4: no filesystem database path exists anywhere in config, so a test
+  // run cannot quietly write a real credential store to disk — there is no
+  // setting that could.
+  assert.ok(!('databaseFile' in defaults.drive), 'no SQLite file setting remains (Phase 4)');
 
-  const custom = loadConfig({ ...base, STOREHUB_DRIVE: '0', STOREHUB_DRIVE_FOLDER: ' backups ', STOREHUB_DRIVE_DB: '/tmp/d.db' });
+  const custom = loadConfig({ ...base, STOREHUB_DRIVE: '0', STOREHUB_DRIVE_FOLDER: ' backups ' });
   assert.equal(custom.drive.enabled, false);
   assert.equal(custom.drive.folderName, 'backups', 'trimmed, and an empty name falls back to the default');
-  assert.equal(custom.drive.databaseFile, '/tmp/d.db');
 
   const blank = loadConfig({ ...base, STOREHUB_DRIVE_FOLDER: '   ' });
   assert.equal(blank.drive.folderName, 'Store Hub Backups', 'a blank folder name cannot create an unnamed folder');
 });
 
-test('CONFIG: the Drive database is a different file from the licence database', () => {
+test('CONFIG: no filesystem database path exists in configuration (Phase 4)', () => {
   const config = loadConfig({
     NODE_ENV: 'test',
     STOREHUB_PEPPER: TEST_PEPPER,
     STOREHUB_DB: './data/storehub.db',
+    STOREHUB_DRIVE_DB: './data/storehub_drive.db',
   });
-  assert.notEqual(
-    config.drive.databaseFile,
-    config.databaseFile,
-    'a long-lived credential must not share a file with licence tables',
-  );
+  // The pre-Phase-4 claim was "the Drive database is a different file from the
+  // licence database". Phase 4 removed the SQLite runtime entirely, so the
+  // stronger statement now holds: there is no database file setting at all,
+  // and nothing could make a long-lived credential share storage with licence
+  // tables. The retired variables are still *readable* above on purpose — a
+  // stale .env must be ignored, not honoured and not fatal.
+  assert.equal(config.databaseFile, undefined, 'STOREHUB_DB is retired');
+  assert.equal(config.drive.databaseFile, undefined, 'STOREHUB_DRIVE_DB is retired');
+  assert.equal(config.usePostgres, undefined, 'usePostgres flag is retired; the URL is the only switch');
+  assert.equal(config.useMemoryDb, undefined, 'in-memory mode flag is retired');
 });
 
 /* ================================================================== *

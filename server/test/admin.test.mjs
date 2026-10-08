@@ -1215,16 +1215,27 @@ test('WIRING: buildApplication assembles a working backend', async () => {
   // `{ repo }` when it is returned bare, so every service was built with
   // `undefined` and the first request failed. Nothing exercised this wiring
   // before, because nothing called it.
+  //
+  // Phase 4: buildApplication is PostgreSQL-only, so the suite injects its
+  // in-memory adapters through the test seam. The wiring under test — shapes,
+  // service construction, guards — is unchanged.
   const { buildApplication } = await import('../src/index.js');
+  const { openLicenseDatabase } = await import('./support/sqlite-license.js');
+  const { openAuthDatabase } = await import('./support/sqlite-auth.js');
+  const { openDriveDatabase } = await import('./support/sqlite-drive.js');
   const app = await buildApplication({
     env: {
       NODE_ENV: 'test',
-      STOREHUB_DB: ':memory:',
       STOREHUB_PEPPER: 'wiring-pepper-not-used-anywhere-0123456789',
       STOREHUB_ADMIN_SUB: ADMIN_SUB,
       STOREHUB_SCRYPT_N: '1024',
       STOREHUB_SCRYPT_R: '8',
       STOREHUB_SCRYPT_P: '1',
+    },
+    adapters: {
+      openLicenseDatabase: (_file, deps) => openLicenseDatabase(':memory:', deps),
+      openAuthDatabase: (_file, deps) => openAuthDatabase(':memory:', deps),
+      openDriveDatabase: (_file, deps) => openDriveDatabase(':memory:', deps),
     },
   });
 

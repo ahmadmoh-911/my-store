@@ -12,8 +12,9 @@
  * stored.
  */
 
-import { loadConfig } from '../src/config.js';
-import { openLicenseDatabase } from '../test/support/sqlite-license.js';
+import { loadConfig, assertPostgresConfigured } from '../src/config.js';
+import { openLicenseDatabase } from '../src/pg-license-repository.js';
+import { createSupabaseClient } from '../src/pg.js';
 import { createLicenseService } from '../src/service.js';
 
 /**
@@ -34,7 +35,12 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const config = loadConfig(process.env);
-const repository = openLicenseDatabase(config.databaseFile, { clock: () => Date.now() });
+// Phase 4: issuing a licence writes to PostgreSQL only. No SUPABASE_DB_URL (or
+// a malformed one) stops here with a clear message instead of writing to a
+// local SQLite file that the running server would never read.
+assertPostgresConfigured(config);
+const pgClient = createSupabaseClient(config);
+const repository = openLicenseDatabase(null, { clock: () => Date.now(), config, pgClient });
 const service = createLicenseService({
   repository,
   config,
