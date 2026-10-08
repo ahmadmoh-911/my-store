@@ -104,13 +104,10 @@ function readPepper(env) {
  *   pepper: string,
  *   port: number,
  *   host: string,
- *   databaseFile: string,
  *   scrypt: {N: number, r: number, p: number, keylen: number},
- *   useMemoryDb: boolean,
  *   supabaseUrl: string|null,
  *   supabaseDbUrl: string|null,
  *   supabaseServiceRoleKey: string|null,
- *   usePostgres: boolean,
  * }}
  */
 export function loadConfig(env = process.env) {
@@ -121,26 +118,19 @@ export function loadConfig(env = process.env) {
     loadEnvFile();
   }
   const nodeEnv = env.NODE_ENV || 'development';
-  const memory = env.STOREHUB_DB === ':memory:';
 
   return {
     env: nodeEnv,
     pepper: readPepper(env),
     port: Number(env.PORT || 8787),
     host: env.HOST || '127.0.0.1',
-    // A real file by default so a restart does not lose every issued licence;
-    // ':memory:' is opt-in for tests.
-    databaseFile: env.STOREHUB_DB || './data/storehub.db',
-    useMemoryDb: memory,
 
     supabaseUrl: env.SUPABASE_URL || null,
+    // Phase 4: the only database setting left. `assertPostgresConfigured`
+    // (called by the runtime entry) refuses a start without it — there is no
+    // SQLite fallback, so no local-file setting exists any more.
     supabaseDbUrl: env.SUPABASE_DB_URL || null,
     supabaseServiceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || null,
-    // PostgreSQL mode is decided by the database URL alone. SUPABASE_URL /
-    // SUPABASE_SERVICE_ROLE_KEY are API credentials and must not be able to turn
-    // this on: a missing or wrong DB URL fails fast instead of silently running
-    // the backend on a connection nobody configured.
-    usePostgres: !!env.SUPABASE_DB_URL,
 
     /**
      * scrypt work factors.
@@ -251,16 +241,18 @@ export function loadConfig(env = process.env) {
      * it brokers the Google grant so the device can hold a short-lived access
      * token instead of a permanent one, and it never receives the backup.
      *
-     * `databaseFile` is a *separate* database from `databaseFile` above, on
-     * purpose. The Drive grant is a long-lived credential, so it is kept apart
-     * from licence and account tables — a dump of one cannot yield the other,
-     * and the grant can be rotated or revoked without touching shop records.
+     * Grants live in PostgreSQL (`drive_grants`), a different table from the
+     * licence and account tables, on purpose: the grant is a long-lived
+     * credential, so it is kept apart from licence and account rows — a dump of
+     * one cannot yield the other, and the grant can be rotated or revoked
+     * without touching shop records. Phase 4 removed the local file setting;
+     * there is no path left that could make the two share a file.
      *
      * `enabled` is opt-out rather than opt-in so that turning backups on never
      * requires a redeploy — but the grant still has to be granted by the account
      * itself before anything happens, so enabling this grants nobody anything.
      */
-    drive: readDriveConfig(env, memory),
+    drive: readDriveConfig(env),
   };
 }
 
@@ -382,21 +374,58 @@ export function assertProductionRedirectUris(config) {
 }
 
 /**
+ * Refuses to start without a usable PostgreSQL connection string.
+ *
+ * Phase 4 removed SQLite from the runtime: PostgreSQL is the only backend. So
+ * a missing or malformed `SUPABASE_DB_URL` must stop the boot here — in
+ * milliseconds, before any socket, file or query — with a message that says
+ * exactly which variable to set, instead of falling back to a local file that
+ * nobody is watching.
+ *
+ * The value is never echoed, not even partially: an error message is the one
+ * place a connection string must not travel through.
+ *
+ * @param {ReturnType<typeof loadConfig>} config
+ * @throws {Error} when `supabaseDbUrl` is missing or is not a postgres URL
+ */
+export function assertPostgresConfigured(config) {
+  const value = config.supabaseDbUrl;
+  if (!value || !String(value).trim()) {
+    throw new Error(
+      'SUPABASE_DB_URL is not set. This server runs only on PostgreSQL — there is no ' +
+        'SQLite fallback. Set SUPABASE_DB_URL to a postgresql://… connection string ' +
+        '(server/.env or the process environment) and start again.',
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      'SUPABASE_DB_URL is not a valid connection URL. Expected a postgresql://… ' +
+        'connection string; the value itself is never printed.',
+    );
+  }
+
+  if (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') {
+    throw new Error(
+      `SUPABASE_DB_URL must use the postgresql:// or postgres:// scheme ` +
+        `(it starts with a different scheme). The value itself is never printed.`,
+    );
+  }
+}
+
+/**
  * Reads the Drive backup block.
  *
  * @param {NodeJS.ProcessEnv} env
- * @returns {{enabled: boolean, databaseFile: string, folderName: string}}
+ * @returns {{enabled: boolean, folderName: string}}
  */
-function readDriveConfig(env, memory) {
+function readDriveConfig(env) {
   const folderName = (env.STOREHUB_DRIVE_FOLDER || '').trim() || 'Store Hub Backups';
   return {
     enabled: env.STOREHUB_DRIVE !== '0' && env.STOREHUB_DRIVE !== 'false',
-    // `STOREHUB_DB=':memory:'` means *every* database is in memory, not just the
-    // licence one. Honouring it here is what keeps a test run from quietly
-    // creating a real `storehub_drive.db` file next to the test output — a test
-    // that writes a durable credential store is a test that leaves secrets
-    // behind on the developer's disk.
-    databaseFile: env.STOREHUB_DRIVE_DB || (memory ? ':memory:' : './data/storehub_drive.db'),
     folderName,
   };
 }

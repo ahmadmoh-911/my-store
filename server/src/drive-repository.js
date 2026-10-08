@@ -109,29 +109,16 @@ export function openGrant(key, sealed) {
   ]).toString('utf8');
 }
 
-/**
- * Creates the Drive grant schema on an open handle.
- *
- * @param {import('node:sqlite').DatabaseSync} db
- * @returns {void}
- */
-export function applyDriveMigrations(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS drive_grants (
-      google_sub     TEXT PRIMARY KEY,
-      refresh_cipher TEXT NOT NULL,
-      scopes         TEXT NOT NULL,
-      granted_at     INTEGER NOT NULL,
-      updated_at     INTEGER NOT NULL,
-      revoked_at     INTEGER
-    );
-  `);
-}
+// Phase 4: the SQLite schema builder (`applyDriveMigrations`) and the SQLite
+// opener (`openDriveDatabase`) that used to live here moved to
+// ../test/support/sqlite-drive.js. This module is reachable from the runtime
+// entry point, and the runtime is PostgreSQL-only.
 
 /**
- * Builds the grant repository (the port) over a SQLite handle.
+ * Builds the grant repository (the port) over a database handle.
  *
- * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} db duck-typed handle from the PostgreSQL adapter (runtime) or
+ *   the test-only SQLite adapter (tests) — never a SQLite driver in the runtime
  * @param {{clock?: () => number, pepper: string}} deps
  */
 export function createDriveRepository(db, { clock, pepper }) {
@@ -239,27 +226,3 @@ export function createDriveRepository(db, { clock, pepper }) {
 /**
  * @typedef {ReturnType<typeof createDriveRepository>} DriveRepository
  */
-
-/**
- * Opens the Drive grant database.
- *
- * Its own file, always. Sharing a file with the licence database would defeat
- * the entire reason this module exists.
- *
- * @param {string} file path, or ':memory:'
- * @param {{clock?: () => number, pepper: string}} deps
- * @returns {Promise<{db: import('node:sqlite').DatabaseSync, repo: DriveRepository}>}
- */
-export async function openDriveDatabase(file, deps) {
-  const clock = deps.clock || (() => Date.now());
-  const { DatabaseSync } = await import('node:sqlite');
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA foreign_keys = ON');
-  if (file !== ':memory:') {
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA synchronous = NORMAL');
-    db.exec('PRAGMA busy_timeout = 5000');
-  }
-  applyDriveMigrations(db);
-  return { db, repo: createDriveRepository(db, { clock, pepper: deps.pepper }) };
-}

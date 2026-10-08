@@ -2,17 +2,18 @@
  * Storage for licence metadata.
  *
  * This module is the *port*: a small set of named operations, nothing about
- * SQLite. `SqliteRepository` in ./sqlite-repository.js is the *adapter* that
- * implements it against Node's built-in `node:sqlite`, which is what runs in
- * development and in tests.
+ * how rows are stored. Two adapters implement it: `./pg-license-repository.js`
+ * against PostgreSQL — the only one the runtime uses since Phase 4 — and the
+ * test-only SQLite adapter in ../test/support/sqlite-license.js, which the
+ * unit suite runs against `:memory:`.
  *
  * The split exists because of a constraint the project set explicitly: local
  * development may use a simple store, but production architecture must not
  * depend on a local file being adequate. Every method below is expressible in
- * SQL that Postgres would accept unchanged, so a hosted database becomes a new
- * adapter rather than a rewrite of the licence logic — and the service layer,
+ * SQL that Postgres accepts unchanged, so the storage choice is an adapter
+ * rather than a rewrite of the licence logic — and the service layer,
  * which is where the rules actually live, never learns which one it is talking
- * to.
+ * to. Phase 4 removed SQLite from the runtime entirely.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -49,61 +50,6 @@ const PUBLIC_COLUMNS =
   'id, status, created_at, activated_at, expires_at, linked_account_id, last_verified_at, note';
 const ALL_COLUMNS = '*';
 
-/** @param {import('node:sqlite').DatabaseSync} db @returns {void} */
-function migrate(db) {
-  db.exec(`
-    -- One licence. One row. No store data, ever.
-    CREATE TABLE IF NOT EXISTS licenses (
-      id                TEXT PRIMARY KEY,
-      code_lookup       TEXT NOT NULL UNIQUE,
-      code_salt         TEXT NOT NULL,
-      code_hash         TEXT NOT NULL,
-      status            TEXT NOT NULL DEFAULT 'active',
-      created_at        INTEGER NOT NULL,
-      activated_at      INTEGER,
-      expires_at        INTEGER,
-      linked_account_id TEXT,
-      last_verified_at  INTEGER,
-      note              TEXT
-    );
-
-    -- Opaque bearer sessions, so /verify never needs the licence code again.
-    CREATE TABLE IF NOT EXISTS license_tokens (
-      token_lookup TEXT PRIMARY KEY,
-      license_id   TEXT NOT NULL REFERENCES licenses(id),
-      created_at   INTEGER NOT NULL,
-      last_used_at INTEGER,
-      revoked_at   INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_tokens_license ON license_tokens(license_id);
-
-    -- Install metadata per licence. No hard device limit is enforced (that was
-    -- a deliberate product decision); this table is for visibility only.
-    CREATE TABLE IF NOT EXISTS license_installs (
-      license_id       TEXT NOT NULL REFERENCES licenses(id),
-      install_id       TEXT NOT NULL,
-      platform         TEXT,
-      app_version      TEXT,
-      first_seen_at    INTEGER NOT NULL,
-      last_seen_at     INTEGER NOT NULL,
-      last_verified_at INTEGER,
-      PRIMARY KEY (license_id, install_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_installs_license ON license_installs(license_id);
-
-    -- Append-only trail of licence state changes. Metadata only.
-    CREATE TABLE IF NOT EXISTS license_events (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      license_id TEXT,
-      event      TEXT NOT NULL,
-      at         INTEGER NOT NULL,
-      install_id TEXT,
-      detail     TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_license ON license_events(license_id, at);
-  `);
-}
-
 /**
  * Maps a database row to a camelCase record.
  *
@@ -129,7 +75,12 @@ function toRecord(row) {
 /**
  * Opens a licence database.
  *
- * @param {import('node:sqlite').DatabaseSync} db
+ * `db` is a duck-typed handle exposing `prepare()`/`exec()` — the PostgreSQL
+ * adapter in ./pg-license-repository.js provides it in the runtime; the
+ * test-only SQLite adapter provides it under test. Nothing reachable from the
+ * server entry point imports a SQLite driver (Phase 4).
+ *
+ * @param {object} db
  * @param {{clock: () => number}} deps
  * @returns {LicenseRepository}
  */
@@ -353,10 +304,10 @@ export function createLicenseRepository(db, { clock }) {
    */
   function findToken(tokenLookup) {
     const row = tokenByLookupStmt.get({ lookup: tokenLookup });
-    // Mapped explicitly: node:sqlite hands back raw snake_case column names, and
-    // a row whose keys are `license_id`/`revoked_at` would leave the caller
-    // reading undefined — which for `revokedAt` would make every session look
-    // revoked rather than none of them.
+    // Mapped explicitly: the database handle hands back raw snake_case column
+    // names, and a row whose keys are `license_id`/`revoked_at` would leave the
+    // caller reading undefined — which for `revokedAt` would make every session
+    // look revoked rather than none of them.
     if (!row) return null;
     return {
       licenseId: row.license_id,
@@ -519,12 +470,6 @@ export function createLicenseRepository(db, { clock }) {
  * @typedef {ReturnType<typeof createLicenseRepository>} LicenseRepository
  */
 
-/**
- * Creates the schema on an already-open database handle.
- *
- * Exported for the adapter and for tests that build their own handle.
- *
- * @param {import('node:sqlite').DatabaseSync} db
- * @returns {void}
- */
-export { migrate as applyMigrations };
+// Phase 4: the SQLite schema builder (`applyMigrations`) that used to live here
+// moved to ../test/support/sqlite-license.js. This module is reachable from the
+// runtime entry point, and the runtime is PostgreSQL-only.

@@ -4,7 +4,8 @@
  * This module implements the DriveRepository interface using a PostgreSQL
  * client. It is used when the backend is configured to use PostgreSQL/Supabase.
  *
- * The adapter follows the same interface as the SQLite adapter in ./drive-repository.js.
+ * The adapter follows the same interface as the repository port in
+ * ./drive-repository.js (Phase 4: this is the only adapter the runtime loads).
  *
  * It does not contain any business logic and does not know about licences,
  * auth, or Drive beyond what is required to implement the repository methods.

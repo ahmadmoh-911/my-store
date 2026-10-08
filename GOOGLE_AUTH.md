@@ -29,9 +29,9 @@ This document describes the Google OAuth 2.0 authentication foundation for Store
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         BACKEND (Node.js)                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │ http.js     │◀─│ auth-service│◀─│ auth-repo   │◀─│ SQLite    │  │
-│  │ (routes)    │  │ .js         │  │ .js         │  │ (shared   │  │
-│  └─────────────┘  └─────────────┘  └─────────────┘  │ DB file)  │  │
+│  │ http.js     │◀─│ auth-service│◀─│ auth-repo   │◀─│PostgreSQL │  │
+│  │ (routes)    │  │ .js         │  │ .js         │  │ (hosted   │  │
+│  └─────────────┘  └─────────────┘  └─────────────┘  │ Supabase) │  │
 │         │                │                │           └───────────┘  │
 │         │                │                │                          │
 │         ▼                ▼                ▼                          │
@@ -63,7 +63,8 @@ This document describes the Google OAuth 2.0 authentication foundation for Store
 | `GOOGLE_DRIVE_REDIRECT_URI` | Drive connect callback (must match Google Cloud console) | Yes (prod) |
 | `GOOGLE_REDIRECT_URI` | **Compatibility fallback** — used in development when per-flow URIs are not set. Must NOT be the only URI in production. | No |
 | `STOREHUB_PEPPER` | Secret for hashing codes/sessions (32+ chars) | Yes (prod) |
-| `STOREHUB_DB` | SQLite database file path | No (default: `./data/storehub.db`) |
+| `SUPABASE_DB_URL` | PostgreSQL connection string — the only backend since Phase 4 (SQLite removed; the server refuses to start without it) | Yes |
+| ~~`STOREHUB_DB`~~ | **Removed in Phase 4** — SQLite file path setting no longer exists | Retired |
 | `STOREHUB_SESSION_TTL_MS` | Session lifetime in ms | No (default: 30 days) |
 | `STOREHUB_CORS_ORIGINS` | Comma-separated allowed origins | No |
 | `NODE_ENV` | `production` or `development` | No (default: development) |
@@ -262,7 +263,7 @@ Test coverage includes:
 ## Files Added / Modified
 
 ### New Backend Files
-- `server/src/auth-repository.js` — Auth port + SQLite adapter
+- `server/src/auth-repository.js` — Auth port (the runtime adapter is PostgreSQL; the SQLite adapter moved to `server/test/support/sqlite-auth.js` in Phase 4)
 - `server/src/auth-service.js` — OAuth flow, session management
 - `server/test/auth.test.mjs` — Auth tests (to be created)
 

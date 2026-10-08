@@ -12,10 +12,10 @@
  *                      node:http server listens on a loopback port, and the
  *                      routes are called over a socket.
  *
- * PostgreSQL-only by construction: this script never opens an SQLite handle and
- * never imports ./helpers.mjs (which does). `node:sqlite` is only ever imported
- * lazily inside the SQLite-only open functions, and the PostgreSQL branch of
- * buildApplication never takes that path because usePostgres is on here.
+ * PostgreSQL-only by construction: this script never opens an SQLite handle,
+ * and since Phase 4 neither does the runtime — `buildApplication()` has no
+ * SQLite branch at all, only the test-only `adapters` seam, which this script
+ * does not use. Nothing from ./test/support is imported here.
  *
  * It reads server/.env via the same config loader as the runtime and connects
  * with `SUPABASE_DB_URL` verbatim. Optional `PG_LIVE_PORT` (default: unset)
@@ -34,7 +34,7 @@ import { createSupabaseClient } from '../src/pg.js';
 import { openLicenseDatabase } from '../src/pg-license-repository.js';
 import { openAuthDatabase } from '../src/pg-auth-repository.js';
 import { openDriveDatabase } from '../src/pg-drive-repository.js';
-// Service + HTTP layers (never ../test/helpers.mjs: that module imports sqlite.js).
+// Service + HTTP layers (never ../test/helpers.mjs: that module is test-only).
 import { createLicenseService } from '../src/service.js';
 import { createAuthService } from '../src/auth-service.js';
 import { createDriveService } from '../src/drive-service.js';
@@ -81,8 +81,8 @@ if (portOverride) {
   process.env.SUPABASE_DB_URL = url.href;
 }
 const config = loadConfig(process.env);
-if (!config.usePostgres) {
-  console.error('test:live blocked: SUPABASE_DB_URL is not set (usePostgres off).');
+if (!config.supabaseDbUrl) {
+  console.error('test:live blocked: SUPABASE_DB_URL is not set (PostgreSQL-only since Phase 4).');
   process.exit(1);
 }
 
@@ -261,11 +261,9 @@ async function httpLayerChecks() {
   const customerCookie = `storehub_session=${customerSession.sessionToken}`;
 
   // Test-scoped process environment only; server/.env is never written.
-  // STOREHUB_ADMIN_SUB authorises this run's throwaway admin sub. STOREHUB_DB
-  // is set to ':memory:' purely so buildApplication does not mkdir a local data
-  // directory — in PostgreSQL mode that path is never opened.
+  // STOREHUB_ADMIN_SUB authorises this run's throwaway admin sub. (Phase 4:
+  // STOREHUB_DB no longer exists — the runtime creates no local files.)
   process.env.STOREHUB_ADMIN_SUB = adminSub;
-  process.env.STOREHUB_DB = ':memory:';
 
   const app = await buildApplication({ env: process.env });
   const server = createLicenseServer({
@@ -398,15 +396,17 @@ async function main() {
     return;
   }
 
-  licenseRepo = openLicenseDatabase(config.databaseFile, { clock, config, pgClient: client });
-  const authDb = await openAuthDatabase(config.databaseFile, {
+  // The leading `null` is the retired filesystem-path argument: PostgreSQL
+  // ignores it, and Phase 4 removed every local database file setting.
+  licenseRepo = openLicenseDatabase(null, { clock, config, pgClient: client });
+  const authDb = await openAuthDatabase(null, {
     clock,
     pepper: config.pepper,
     config,
     pgClient: client,
   });
   authRepo = authDb.repo;
-  const driveDb = await openDriveDatabase(config.databaseFile, {
+  const driveDb = await openDriveDatabase(null, {
     clock,
     pepper: config.pepper,
     config,
