@@ -1,13 +1,21 @@
 /**
  * Live PostgreSQL smoke test (Phase 6).
  *
- * Runs the real repositories (license, auth, drive) end-to-end against the
- * live Supabase database through the synchronous connection layer, then cleans
- * up its own `__test_*` rows back to exactly zero.
+ * Runs three layers against the live Supabase database through the synchronous
+ * connection layer, then cleans up its own rows back to exactly zero:
  *
- * PostgreSQL-only by construction: this script never opens an SQLite handle.
- * (The shared repository modules import `node:sqlite` lazily inside their
- * SQLite-only open functions, which are never called here.)
+ *   1. repositories  — license, auth, drive, straight against the tables;
+ *   2. services      — createLicenseService / createAuthService /
+ *                      createDriveService / createAdminLicenseService built on
+ *                      those same PostgreSQL repositories;
+ *   3. HTTP          — buildApplication() boots in PostgreSQL mode, the real
+ *                      node:http server listens on a loopback port, and the
+ *                      routes are called over a socket.
+ *
+ * PostgreSQL-only by construction: this script never opens an SQLite handle and
+ * never imports ./helpers.mjs (which does). `node:sqlite` is only ever imported
+ * lazily inside the SQLite-only open functions, and the PostgreSQL branch of
+ * buildApplication never takes that path because usePostgres is on here.
  *
  * It reads server/.env via the same config loader as the runtime and connects
  * with `SUPABASE_DB_URL` verbatim. Optional `PG_LIVE_PORT` (default: unset)
@@ -19,12 +27,20 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
 
 import { loadEnvFile, loadConfig } from '../src/config.js';
 import { createSupabaseClient } from '../src/pg.js';
 import { openLicenseDatabase } from '../src/pg-license-repository.js';
 import { openAuthDatabase } from '../src/pg-auth-repository.js';
 import { openDriveDatabase } from '../src/pg-drive-repository.js';
+// Service + HTTP layers (never ../test/helpers.mjs: that module imports sqlite.js).
+import { createLicenseService } from '../src/service.js';
+import { createAuthService } from '../src/auth-service.js';
+import { createDriveService } from '../src/drive-service.js';
+import { createAdminLicenseService } from '../src/admin-service.js';
+import { buildApplication } from '../src/index.js';
+import { createLicenseServer } from '../src/http.js';
 
 // ---------------------------------------------------------------------------
 // Tiny assertion harness (deliberately dependency-free).
@@ -75,6 +91,19 @@ const now = Date.now();
 const prefix = `__test_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
 const accountSub = `${prefix}_sub`;
 
+/**
+ * Ids of licences minted by the service and HTTP layers.
+ *
+ * Those ids are random UUIDs (the service calls `repository.newId()`), so a
+ * `__test_` prefix cannot be used to find them. Cleanup therefore tracks the
+ * exact ids here and also gives every one of those rows a `__test_` note as a
+ * second key — no cleanup statement is ever table-wide.
+ */
+const trackedLicenseIds = new Set();
+function trackLicense(id) {
+  if (id) trackedLicenseIds.add(String(id));
+}
+
 const TABLES = [
   'licenses',
   'license_tokens',
@@ -102,7 +131,21 @@ async function baselineCheck() {
 
 function cleanup() {
   // FK order: events (no FK) -> tokens -> installs -> licenses -> sessions ->
-  // drive grants -> accounts.
+  // drive grants -> accounts. Every predicate is an exact key — either an id
+  // captured while testing or a `__test_` marker — never a table-wide delete.
+  for (const id of trackedLicenseIds) {
+    client.exec('DELETE FROM license_events WHERE license_id = $1', [id]);
+    client.exec('DELETE FROM license_tokens WHERE license_id = $1', [id]);
+    client.exec('DELETE FROM license_installs WHERE license_id = $1', [id]);
+    client.exec('DELETE FROM licenses WHERE id = $1', [id]);
+  }
+  // Service/HTTP licences whose id was not captured: keyed on their `__test_`
+  // note, children first.
+  client.exec("DELETE FROM license_events WHERE license_id IN (SELECT id FROM licenses WHERE note LIKE '__test_%')");
+  client.exec("DELETE FROM license_tokens WHERE license_id IN (SELECT id FROM licenses WHERE note LIKE '__test_%')");
+  client.exec("DELETE FROM license_installs WHERE license_id IN (SELECT id FROM licenses WHERE note LIKE '__test_%')");
+  client.exec("DELETE FROM licenses WHERE note LIKE '__test_%'");
+  // Repository checks: ids and lookups that carry the `__test_` marker.
   client.exec("DELETE FROM license_events WHERE license_id LIKE '__test_%'");
   client.exec("DELETE FROM license_tokens WHERE license_id LIKE '__test_%'");
   client.exec("DELETE FROM license_installs WHERE license_id LIKE '__test_%'");
@@ -110,6 +153,233 @@ function cleanup() {
   client.exec("DELETE FROM auth_sessions WHERE google_sub LIKE '__test_%'");
   client.exec("DELETE FROM drive_grants WHERE google_sub LIKE '__test_%'");
   client.exec("DELETE FROM auth_accounts WHERE google_sub LIKE '__test_%'");
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2 — the services, built on the same PostgreSQL repositories
+// ---------------------------------------------------------------------------
+function serviceLayerChecks() {
+  const licenseService = createLicenseService({ repository: licenseRepo, config, clock, log: () => {} });
+  const authService = createAuthService({ authRepository: authRepo, config, clock, log: () => {} });
+  const driveService = createDriveService({ driveRepository: driveRepo, config, clock, log: () => {} });
+  const adminService = createAdminLicenseService({ licenseService, repository: licenseRepo, clock, log: () => {} });
+
+  // -- licence lifecycle -----------------------------------------------------
+  const { license: issued, code } = licenseService.createLicense({
+    expiresInDays: 1,
+    note: `${prefix}_service`,
+  });
+  trackLicense(issued.id);
+  check('service: createLicense issues a code', typeof code === 'string' && code.startsWith('SH-'));
+
+  const activation = licenseService.activate({
+    licenseCode: code,
+    installId: `${prefix}-svc`,
+    platform: 'android',
+    appVersion: '9.9.9',
+  });
+  check('service: activate issues a session token', typeof activation.sessionToken === 'string' && activation.sessionToken.length >= 40);
+
+  const verified = licenseService.verify({
+    sessionToken: activation.sessionToken,
+    installId: `${prefix}-svc`,
+    platform: 'android',
+    appVersion: '9.9.9',
+  });
+  check('service: verify accepts the activation session', verified?.license?.status === 'active');
+
+  licenseService.bind({ sessionToken: activation.sessionToken, accountId: accountSub });
+  checkEq('service: bind links the account', licenseRepo.findById(issued.id)?.linkedAccountId, accountSub);
+
+  const view = adminService.getLicense(issued.id)?.license;
+  check(
+    'service: admin view carries no code material',
+    !!view && !('codeHash' in view) && !('codeSalt' in view) && !('codeLookup' in view),
+    view ? '' : 'admin view missing',
+  );
+
+  // -- auth session ----------------------------------------------------------
+  const { sessionToken } = authRepo.createSession(accountSub, 120_000, 'live-service');
+  check('service: getMe resolves a repository session', authService.getMe(sessionToken)?.account?.googleSub === accountSub);
+  check('service: getMe refuses a mutated token', authService.getMe(`${sessionToken.slice(0, -1)}X`) === null);
+
+  // -- drive -----------------------------------------------------------------
+  const fakeRefresh = `${prefix}-refresh-${randomUUID()}`;
+  const recorded = driveService.recordGrant({ googleSub: accountSub, refreshToken: fakeRefresh, scopes: 'drive.file' });
+  check('service: recordGrant accepts a fake refresh token', recorded?.googleSub === accountSub);
+  const state = driveService.describe(accountSub);
+  check('service: describe reports connected', state.connected === true);
+  check('service: describe carries no refresh token', !JSON.stringify(state).includes(fakeRefresh));
+  checkEq('service: disconnect revokes the grant', driveService.disconnect(accountSub), true);
+  check('service: describe reports disconnected', driveService.describe(accountSub).connected === false);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3 — the real HTTP server, in PostgreSQL mode, over a loopback socket
+// ---------------------------------------------------------------------------
+let httpBase = '';
+
+/** One HTTP round trip against the booted server. No proxy, no agent. */
+function call(method, path, { body, cookie } = {}) {
+  const payload = body === undefined ? null : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      `${httpBase}${path}`,
+      {
+        method,
+        agent: false,
+        headers: {
+          ...(payload
+            ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) }
+            : {}),
+          ...(cookie ? { cookie } : {}),
+        },
+      },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { text += chunk; });
+        res.on('end', () => {
+          let parsed = null;
+          try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+          resolve({ status: res.statusCode, body: parsed });
+        });
+      },
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function httpLayerChecks() {
+  const adminSub = `${prefix}_admin_sub`;
+  authRepo.upsertAccount({ googleSub: adminSub, email: `${adminSub}@live-test.invalid`, displayName: 'Live Admin' });
+  const adminSession = authRepo.createSession(adminSub, 120_000, 'live-http-admin');
+  const customerSession = authRepo.createSession(accountSub, 120_000, 'live-http-customer');
+  const adminCookie = `storehub_session=${adminSession.sessionToken}`;
+  const customerCookie = `storehub_session=${customerSession.sessionToken}`;
+
+  // Test-scoped process environment only; server/.env is never written.
+  // STOREHUB_ADMIN_SUB authorises this run's throwaway admin sub. STOREHUB_DB
+  // is set to ':memory:' purely so buildApplication does not mkdir a local data
+  // directory — in PostgreSQL mode that path is never opened.
+  process.env.STOREHUB_ADMIN_SUB = adminSub;
+  process.env.STOREHUB_DB = ':memory:';
+
+  const app = await buildApplication({ env: process.env });
+  const server = createLicenseServer({
+    licenseService: app.licenseService,
+    authService: app.authService,
+    adminService: app.adminService,
+    driveService: app.driveService,
+    config: app.config,
+    log: () => {},
+  });
+
+  try {
+    const address = await server.listen(0, '127.0.0.1');
+    httpBase = `http://127.0.0.1:${address.port}`;
+    ok(`http: server listening on 127.0.0.1:${address.port} (PostgreSQL mode)`);
+
+    // -- routes that do not exist in the contract ---------------------------
+    // These four paths appear only in PHASE_2_AUDIT_REPORT.md's inventory; the
+    // route table in http.js has never carried them. Asserted as 404 so the
+    // gap is evidence, not an assumption.
+    for (const [method, path] of [
+      ['POST', '/api/auth/session'],
+      ['POST', '/api/auth/session/verify'],
+      ['POST', '/api/drive/grant'],
+      ['POST', '/api/drive/revoke'],
+    ]) {
+      const r = await call(method, path, { body: {} });
+      check(`http: ${method} ${path} is not implemented (404)`, r.status === 404, `got ${r.status}`);
+    }
+
+    // -- auth session over HTTP ---------------------------------------------
+    const me = await call('GET', '/api/auth/me', { cookie: customerCookie });
+    check(
+      'http: GET /api/auth/me resolves the session',
+      me.status === 200 && me.body?.authenticated === true && me.body?.account?.googleSub === accountSub,
+      `status ${me.status}`,
+    );
+    const anon = await call('GET', '/api/auth/me');
+    check('http: GET /api/auth/me reports anonymous without a cookie', anon.status === 200 && anon.body?.authenticated === false);
+
+    // -- admin plane ---------------------------------------------------------
+    const adminMe = await call('GET', '/api/admin/me', { cookie: adminCookie });
+    check('http: GET /api/admin/me authorises the admin sub', adminMe.status === 200 && adminMe.body?.admin?.googleSub === adminSub, `status ${adminMe.status}`);
+    const adminNoSession = await call('GET', '/api/admin/me');
+    check('http: GET /api/admin/me refuses without a session', adminNoSession.status === 401, `got ${adminNoSession.status}`);
+
+    const created = await call('POST', '/api/admin/licenses', {
+      cookie: adminCookie,
+      body: { expiresInDays: 1, note: `${prefix}_admin` },
+    });
+    const adminLicenseId = created.body?.license?.id;
+    const adminCode = created.body?.code;
+    trackLicense(adminLicenseId);
+    check('http: POST /api/admin/licenses returns id + code once', created.status === 200 && typeof adminLicenseId === 'string' && typeof adminCode === 'string', `status ${created.status}`);
+
+    const list = await call('GET', '/api/admin/licenses?limit=200', { cookie: adminCookie });
+    check(
+      'http: GET /api/admin/licenses lists the test licence',
+      list.status === 200 && Array.isArray(list.body?.licenses) && list.body.licenses.some((l) => l.id === adminLicenseId),
+      `status ${list.status}`,
+    );
+
+    // -- customer licence plane over HTTP -----------------------------------
+    const activation = await call('POST', '/api/license/activate', {
+      body: {
+        licenseCode: adminCode,
+        installId: `${prefix}-http`,
+        platform: 'android',
+        appVersion: '9.9.9',
+      },
+    });
+    const token = activation.body?.sessionToken;
+    check('http: POST /api/license/activate', activation.status === 200 && typeof token === 'string' && token.length >= 40, `status ${activation.status}`);
+
+    const verification = await call('POST', '/api/license/verify', {
+      body: { sessionToken: token, installId: `${prefix}-http`, platform: 'android', appVersion: '9.9.9' },
+    });
+    check('http: POST /api/license/verify', verification.status === 200 && verification.body?.license?.status === 'active', `status ${verification.status}`);
+
+    const binding = await call('POST', '/api/license/bind', {
+      body: { sessionToken: token, accountId: accountSub },
+    });
+    check('http: POST /api/license/bind links the account', binding.status === 200 && binding.body?.linkedAccountId === accountSub, `status ${binding.status}`);
+
+    // -- admin lifecycle over HTTP ------------------------------------------
+    const suspended = await call('POST', `/api/admin/licenses/${adminLicenseId}/suspend`, { cookie: adminCookie, body: { reason: 'live test' } });
+    check('http: POST .../suspend', suspended.status === 200 && suspended.body?.license?.status === 'suspended', `status ${suspended.status}`);
+
+    const reactivated = await call('POST', `/api/admin/licenses/${adminLicenseId}/reactivate`, { cookie: adminCookie, body: { reason: 'live test' } });
+    check('http: POST .../reactivate', reactivated.status === 200 && reactivated.body?.license?.status === 'active', `status ${reactivated.status}`);
+
+    const revoked = await call('POST', `/api/admin/licenses/${adminLicenseId}/revoke`, { cookie: adminCookie, body: { reason: 'live test' } });
+    check('http: POST .../revoke', revoked.status === 200 && revoked.body?.license?.status === 'revoked', `status ${revoked.status}`);
+
+    // -- drive plane over HTTP ----------------------------------------------
+    const fakeRefresh = `${prefix}-http-refresh-${randomUUID()}`;
+    app.driveService.recordGrant({ googleSub: accountSub, refreshToken: fakeRefresh, scopes: 'drive.file' });
+
+    const driveStatus = await call('GET', '/api/drive/status', { cookie: customerCookie });
+    check('http: GET /api/drive/status reports connected', driveStatus.status === 200 && driveStatus.body?.connected === true, `status ${driveStatus.status}`);
+    check('http: drive status leaks no refresh token', !JSON.stringify(driveStatus.body ?? {}).includes(fakeRefresh));
+
+    const driveNoSession = await call('GET', '/api/drive/status');
+    check('http: drive routes refuse without a session', driveNoSession.status === 401, `got ${driveNoSession.status}`);
+
+    const disconnect = await call('POST', '/api/drive/disconnect', { cookie: customerCookie });
+    check('http: POST /api/drive/disconnect revokes', disconnect.status === 200 && disconnect.body?.ok === true, `status ${disconnect.status}`);
+
+    const after = await call('GET', '/api/drive/status', { cookie: customerCookie });
+    check('http: drive status reports disconnected after revoke', after.body?.connected === false, `status ${after.status}`);
+  } finally {
+    try { await new Promise((resolve) => server.server.close(resolve)); } catch { /* already closed */ }
+    try { app.close(); } catch { /* best effort */ }
+  }
 }
 
 async function main() {
@@ -240,6 +510,16 @@ async function main() {
   checkEq('drive: revokeGrant', driveRepo.revokeGrant(accountSub), true);
   check('drive: getGrant returns null after revoke', driveRepo.getGrant(accountSub) === null);
   checkEq('drive: deleteGrant', driveRepo.deleteGrant(accountSub), true);
+
+  // -------------------------------------------------------------------------
+  // Layer 2: services over the PostgreSQL repositories
+  // -------------------------------------------------------------------------
+  serviceLayerChecks();
+
+  // -------------------------------------------------------------------------
+  // Layer 3: the real HTTP server in PostgreSQL mode
+  // -------------------------------------------------------------------------
+  await httpLayerChecks();
 
   // -------------------------------------------------------------------------
   // Wrap up
