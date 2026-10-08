@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test",
+    "test:live": "node scripts/pg-live.mjs",
     "issue": "node scripts/issue-license.mjs"
   },
   "dependencies": {

@@ -27,7 +27,14 @@ import { createRequire } from 'node:module';
 // `pg` is a CommonJS package; require it explicitly so the worker never depends
 // on Node's named-export detection for the ESM wrapper.
 const require = createRequire(import.meta.url);
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// node-postgres returns BIGINT (int8, OID 20) columns as strings by default.
+// The repositories and the HTTP layer treat timestamps (epoch ms) and counts as
+// plain JS numbers, matching the SQLite backend. Epoch-ms values and row counts
+// are far below Number.MAX_SAFE_INTEGER, so decoding int8 to Number here keeps
+// the repository/API contract identical across backends.
+types.setTypeParser(20, (value) => (value === null ? null : Number(value)));
 
 const {
   connectionString,
