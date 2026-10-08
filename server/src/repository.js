@@ -49,61 +49,6 @@ const PUBLIC_COLUMNS =
   'id, status, created_at, activated_at, expires_at, linked_account_id, last_verified_at, note';
 const ALL_COLUMNS = '*';
 
-/** @param {import('node:sqlite').DatabaseSync} db @returns {void} */
-function migrate(db) {
-  db.exec(`
-    -- One licence. One row. No store data, ever.
-    CREATE TABLE IF NOT EXISTS licenses (
-      id                TEXT PRIMARY KEY,
-      code_lookup       TEXT NOT NULL UNIQUE,
-      code_salt         TEXT NOT NULL,
-      code_hash         TEXT NOT NULL,
-      status            TEXT NOT NULL DEFAULT 'active',
-      created_at        INTEGER NOT NULL,
-      activated_at      INTEGER,
-      expires_at        INTEGER,
-      linked_account_id TEXT,
-      last_verified_at  INTEGER,
-      note              TEXT
-    );
-
-    -- Opaque bearer sessions, so /verify never needs the licence code again.
-    CREATE TABLE IF NOT EXISTS license_tokens (
-      token_lookup TEXT PRIMARY KEY,
-      license_id   TEXT NOT NULL REFERENCES licenses(id),
-      created_at   INTEGER NOT NULL,
-      last_used_at INTEGER,
-      revoked_at   INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_tokens_license ON license_tokens(license_id);
-
-    -- Install metadata per licence. No hard device limit is enforced (that was
-    -- a deliberate product decision); this table is for visibility only.
-    CREATE TABLE IF NOT EXISTS license_installs (
-      license_id       TEXT NOT NULL REFERENCES licenses(id),
-      install_id       TEXT NOT NULL,
-      platform         TEXT,
-      app_version      TEXT,
-      first_seen_at    INTEGER NOT NULL,
-      last_seen_at     INTEGER NOT NULL,
-      last_verified_at INTEGER,
-      PRIMARY KEY (license_id, install_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_installs_license ON license_installs(license_id);
-
-    -- Append-only trail of licence state changes. Metadata only.
-    CREATE TABLE IF NOT EXISTS license_events (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      license_id TEXT,
-      event      TEXT NOT NULL,
-      at         INTEGER NOT NULL,
-      install_id TEXT,
-      detail     TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_license ON license_events(license_id, at);
-  `);
-}
-
 /**
  * Maps a database row to a camelCase record.
  *
@@ -519,12 +464,6 @@ export function createLicenseRepository(db, { clock }) {
  * @typedef {ReturnType<typeof createLicenseRepository>} LicenseRepository
  */
 
-/**
- * Creates the schema on an already-open database handle.
- *
- * Exported for the adapter and for tests that build their own handle.
- *
- * @param {import('node:sqlite').DatabaseSync} db
- * @returns {void}
- */
-export { migrate as applyMigrations };
+// Phase 4: the SQLite schema builder (`applyMigrations`) that used to live here
+// moved to ../test/support/sqlite-license.js. This module is reachable from the
+// runtime entry point, and the runtime is PostgreSQL-only.

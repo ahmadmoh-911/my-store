@@ -60,9 +60,11 @@ export async function buildApplication(options = {}) {
      openAuthDatabase = pgAuth.openAuthDatabase;
      openDriveDatabase = pgDrive.openDriveDatabase;
    } else {
-     const sqliteLicense = await import('./sqlite.js');
-     const sqliteAuth = await import('./auth-repository.js');
-     const sqliteDrive = await import('./drive-repository.js');
+     // TEMPORARY (Phase 4, commit A): SQLite adapters are test-only now;
+     // commit B removes this branch so the runtime opens PostgreSQL only.
+     const sqliteLicense = await import('../test/support/sqlite-license.js');
+     const sqliteAuth = await import('../test/support/sqlite-auth.js');
+     const sqliteDrive = await import('../test/support/sqlite-drive.js');
      openLicenseDatabase = sqliteLicense.openLicenseDatabase;
      openAuthDatabase = sqliteAuth.openAuthDatabase;
      openDriveDatabase = sqliteDrive.openDriveDatabase;

@@ -13,7 +13,7 @@
  */
 
 import { loadConfig } from '../src/config.js';
-import { openLicenseDatabase } from '../src/sqlite.js';
+import { openLicenseDatabase } from '../test/support/sqlite-license.js';
 import { createLicenseService } from '../src/service.js';
 
 /**

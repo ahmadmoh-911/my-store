@@ -30,8 +30,8 @@ import {
   deriveGrantKey,
   sealGrant,
   openGrant,
-  applyDriveMigrations,
 } from '../src/drive-repository.js';
+import { applyDriveMigrations } from './support/sqlite-drive.js';
 import { createDriveService, DRIVE_SCOPE } from '../src/drive-service.js';
 import { ERROR_CODES } from '../src/errors.js';
 import { loadConfig } from '../src/config.js';

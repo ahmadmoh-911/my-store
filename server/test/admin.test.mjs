@@ -28,8 +28,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { createTestAdminApp, request } from './helpers.mjs';
 import { loadConfig } from '../src/config.js';
-import { applyMigrations } from '../src/repository.js';
-import { openAuthDatabase } from '../src/auth-repository.js';
+import { applyMigrations } from './support/sqlite-license.js';
+import { openAuthDatabase } from './support/sqlite-auth.js';
 import { isAuthorizedAdmin, describeAdminConfiguration } from '../src/admin-authorization.js';
 import { ERROR_CODES } from '../src/errors.js';
 

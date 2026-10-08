@@ -12,14 +12,14 @@
  */
 
 import { loadConfig } from '../src/config.js';
-import { openLicenseDatabase } from '../src/sqlite.js';
+import { openLicenseDatabase } from './support/sqlite-license.js';
 import { createLicenseService } from '../src/service.js';
 import { createRequestHandler } from '../src/http.js';
 import { generateLicenseCode } from '../src/codes.js';
-import { openAuthDatabase } from '../src/auth-repository.js';
+import { openAuthDatabase } from './support/sqlite-auth.js';
 import { createAuthService } from '../src/auth-service.js';
 import { createAdminLicenseService } from '../src/admin-service.js';
-import { openDriveDatabase } from '../src/drive-repository.js';
+import { openDriveDatabase } from './support/sqlite-drive.js';
 import { createDriveService } from '../src/drive-service.js';
 
 /**
