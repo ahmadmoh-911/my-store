@@ -218,3 +218,99 @@
 # ✅ READY TO MERGE
 
 كل بند من البنود التسعة مدعوم بدليل (جدول مقارنة من المصدرين المستقلين؛ تحليل الحاجز بأدلة أسطر؛ إثبات الخصائص الأمنية بأعمدة حية + كود الكتابة؛ تسلسل 001→002 محقق نصيًا ومطابقًا حيًا؛ test:live 67/0 × المنفذين بتنظيف صفري؛ عدم وجود prepared statements وtransaction أحادي الاتصال مؤكدان بالكود وبالتشغيل عبر 6543؛ غياب ملف SQLite موثّق كحالة لا كقيمة؛ MCP list_tables+advisors بنتائجهما؛ نصّا التفويض من سجل المستودع). الملاحظات المسجّلة غير الحاجبة للمتابعة لاحقًا (خارج نطاق هذا الإغلاق المقيّد): تحذير `function_search_path_mutable` على دالتّي `001_validation.sql`، وملاحظة صغرية في `service.js` (الفحص على `'UNIQUE'` في رسالة الخطأ لا يطابق رسالة PG للتعارض) — كلاهما بلا أثر عملي؛ لا push ولا merge نُفّذا حتى الآن.
+
+---
+
+# مرحلة 4 — إخراج SQLite من وقت التشغيل (runtime)
+
+**التاريخ:** 2026-10-08 · **الفرع:** `phase4-remove-sqlite-runtime` · **نقطة الأمان:** علامة `backup-before-phase4` · **الحالة:** ✅ **PHASE 4 DONE**
+
+الهدف: أن يصبح PostgreSQL/Supabase هو قاعدة البيانات الوحيدة عند تشغيل الخادم، مع بقاء اختبارات SQLite `:memory:` تعمل كما هي، دون أي تغيير على الواجهة الأمامية أو منطق الأعمال أو عقود الـ API، ودون أي تعديل حي على Supabase، ودون مسح أي بيانات.
+
+## 1) جرد كل مراجع SQLite (Step 1)
+
+خط الأساس عند علامة `backup-before-phase4`: `git grep -I -i sqlite` (باستثناء `package-lock.json`) = **135 مطابقة في 27 ملفًا**. بعد المرحلة = **162 مطابقة في 30 ملفًا** (الزيادة: ملفات `test/support/` الجديدة + تعليقات وصفية مصّحتة). لا يوجد أي ملف `.db`/`.sqlite` في المستودع (0)، ومجلد `server/data` غير موجود، ومجلد `data/` جذري فارغ.
+
+| الملف | الاستخدام قبل المرحلة | التصنيف | المصير في مرحلة 4 |
+|---|---|---|---|
+| `server/src/sqlite.js` | مواصفات/أنواع SQLite المشتركة | runtime | **حُذف (D)** |
+| `server/src/repository.js` | DDL + فتح SQLite للتراخيص + نقل البيانات | runtime | **نُظّف**: بقيت `create*Repository` (منطق الأعمال/العقد) فقط |
+| `server/src/auth-repository.js` | DDL + فتح SQLite للمصادقة | runtime | **نُظّف**: بقي `createAuthRepository` فقط |
+| `server/src/drive-repository.js` | DDL + فتح SQLite لنسخ Drive | runtime | **نُظّف**: بقي `createDriveRepository` فقط |
+| `server/src/index.js` | فتح 3 قواعد SQLite + `STOREHUB_DB` + منطق `mkdir` | runtime | **أُعيد كتابته**: PostgreSQL فقط + `assertPostgresConfigured` + فشل سريع؛ لا أي استيراد sqlite |
+| `server/src/config.js` | `databaseFile` / `useMemoryDb` / `usePostgres` / `drive.databaseFile` | runtime | **حُذفت** هذه الحقول + دالة `assertPostgresConfigured` الجديدة؛ `STOREHUB_DB` تُتجاهل |
+| `server/scripts/issue-license.mjs` | فتح SQLite للتراخيص | scripts | **حُول إلى PostgreSQL** عبر `SUPABASE_DB_URL` |
+| `server/scripts/pg-live.mjs` | تعليقات وصفية | scripts | صُحّحت (بدون تغيير منطق) |
+| `server/test/support/sqlite-license.js` (جديد) | — | test-only | **أُنشئ**: مواضع/DDL/migrations الخاصة بالاختبارات |
+| `server/test/support/sqlite-auth.js` (جديد) | — | test-only | **أُنشئ**: DDL/migrations الخاصة بالاختبارات |
+| `server/test/support/sqlite-drive.js` (جديد) | — | test-only | **أُنشئ**: DDL/migrations الخاصة بالاختبارات |
+| `server/test/helpers.mjs` | استيراد فتحات SQLite من `src` | test-only | مسار الاستيراد فقط |
+| `server/test/admin.test.mjs`، `server/test/drive.test.mjs` | استيراد + خياطة الفتحات | test-only | مسار الاستيراد + فتحة `adapters` (لا منطق اختبار مُعاد كتابته) |
+| `server/test/*.test.mjs` الأخرى (15 ملفًا) | استيراد `src` | test-only | **لم تُمس** |
+| `server/src/pg-live.js`, `server/src/pg.js` | PostgreSQL فقط | runtime | **بقيت كما هي** |
+| `GOOGLE_AUTH.md`, `ADMIN_PORTAL.md`, `DRIVE_BACKUP.md`, `.env.example`, `.gitignore` | وثائق حيّة/قوالب | docs | حُدّثت لتعكس `SUPABASE_DB_URL` فقط |
+| `PHASE_2_1_SQLITE_PG_AUDIT_REPORT.md`, `PHASE_2_3_SQLITE_OPTIONAL_REPORT.md`, `PHASE_2_5_SQLITE_AUDIT_REPORT.md`, `PHASE_2_AUDIT_REPORT.md`, هذا التقرير | سجل تاريخي | docs | **لم تُمس** (توثيق ماضٍ لا يُحرَّر) |
+| `package-lock.json` | اعتماد غير مباشر `node:sqlite` | (خارج الحساب) | خارج النطاق; لا `better-sqlite3` في أي `package.json` |
+
+## 2) ما أُزيل مقابل ما أُبقي للاختبارات فقط (Step 2)
+
+**أُزيل من وقت التشغيل بالكامل:**
+- كل استيراد `node:sqlite` / `better-sqlite3` / `server/src/sqlite.js` من `server/src/**` و`server/scripts/**` (صفر).
+- منطق فتح ملفات القواعد الثلاث و`mkdir` و`STOREHUB_DB` من `index.js`.
+- حقول `databaseFile` / `useMemoryDb` / `usePostgres` / `drive.databaseFile` من `config.js` ومن `.env.example`.
+- أي مسار «احتياطي» إلى SQLite: التشغيل بدون `SUPABASE_DB_URL` يفشل خلال أقل من ثانيتين برسالة صريحة تقول إن الخادم يعمل على PostgreSQL فقط ولا يوجد احتياطي SQLite (بدون طباعة أي سر).
+
+**أُبقي للاختبارات فقط (test-only):**
+- `server/test/support/sqlite-*.js` الثلاثة: مواضع/DDL/migrations + فتح `:memory:` (لا يصلها كود الإنتاج إطلاقًا).
+- فتحة `buildApplication({ env, adapters })`: غياب `adapters` ⇒ `assertPostgresConfigured(config)` ثم محولات PostgreSQL على بركة واحدة؛ الاختبارات تمرّر فتحاتها الخاصة. `index.js` يمرّر `null` كأول وسيطة (PostgreSQL يتجاهلها).
+- اختبارات SQLite `:memory:` الـ 170 الأصلية تعمل **كما هي**؛ عُدّل 4 اختبارات فقط بحد أدنى (خياطة `adapters` في WIRING + ISOLATION، وبحثًا عن حقل مُزال في اختباري CONFIG).
+
+**بدون تغييرات:** الواجهة الأمامية (js/، الشاشات، IndexedDB، Capacitor)، منطق الأعمال، أسماء/عقود الـ API، `.env`، ملفات SQLite الحقيقية (لا توجد في الأصل).
+
+## 3) الإثباتات (Step 3)
+
+### أ) مخطط الاستيراد + grep مكمّل — PASS
+- أداة تتبع الاستيراد من خارج المشروع انطلاقًا من `server/src/index.js`: **18 وحدة قابلة للوصول، 0 منها ممنوع** (خط الأساس قبل المرحلة: 19 وحدة، منها 13 ممنوعة).
+- grep مكمّل: **0** مطابقة لـ `node:sqlite|better-sqlite3` في `server/src` + `server/scripts`؛ المطابقات كلها في 5 ملفات اختبارية فقط (`test/support/*` + مسار الاستيراد في الاختبارات).
+
+### ب) فشل سريع دون `SUPABASE_DB_URL` — PASS
+- نسخة معقّمة (src + package.json، **بلا ملف `.env`**) خارج المشروع، تشغيل بدون `SUPABASE_DB_URL`: **خروج 1 خلال 1154 مللي ثانية** (متوسط ~1.1 ثانية) — 6/6 فحوصات:
+  1. الرسالة تذكر `SUPABASE_DB_URL`؛
+  2. تقول صراحة "there is no SQLite fallback"؛
+  3. لا تطبع أي سلسلة اتصال أو قيمة؛
+  4. لم يستمع الخادم على أي منفذ إطلاقًا؛
+  5. قيمة غير صالحة ⇒ `SUPABASE_DB_URL is not a valid connection URL...`؛
+  6. مخطط `file://` ⇒ `must use the postgresql:// or postgres:// scheme...`.
+- لم يُلمس `.env` أو `server/.env` أثناء الفحص (两者 LastWriteTime تبقىان من 2026-10-07، قبل الجلسة).
+
+### ج) تشغيل حقيقي على PostgreSQL + إيقاف نظيف — PASS
+- خادم حقيقي على `SUPABASE_DB_URL` ⇒ `127.0.0.1:8787`؛ مسار عام `GET /api/auth/me` أعاد **200** برد JSON.
+- إرسال إشارة إيقاف ⇒ سجل `SIGBREAK received, closing` ثم **`code=0 signal=null`** والإغلاق خلال 28 مللي ثانية، بلا crash. (على Windows أُرسلت `SIGBREAK` لأن `SIGINT` عابر العمليات غير موثوق هنا؛ أُضيف معالج `SIGBREAK` لروتين الإيقاف — تشغيلي لا منطقي.)
+
+### د) الاختبارات — PASS
+- `node --test` (server/): **173 pass / 0 fail** (170 اختبارًا أصليًا لم يُعاد كتابتها + 3 تمريرات مستوى ملف لـ `test/support/*.js`).
+- `npm run test:live`: **67 passed / 0 failed**، و«cleanup: every table back to exactly 0 rows» لجدول البنود السبعة (`licenses`, `license_tokens`, `license_installs`, `license_events`, `auth_accounts`, `auth_sessions`, `drive_grants`).
+
+### هـ) خيط الأمان (أسرار) — PASS
+`git grep -I` (يقرأ الملفات المتتبَّعة فقط، ولا يرى `.env` المتجاهَلَين/غير المتتبَّعين):
+- `postgresql://` → 3 ملفات فقط: `.env.example` (قالب `postgresql://user:password@host/db`)، `PHASE_2_RUNTIME_PG_REPORT.md`، `server/src/config.js` (رسالة تدقيق) — **لا سلسلة اتصال حقيقية**.
+- `eyJ` → ملف واحد `PHASE_2_RUNTIME_PG_REPORT.md` (مطابقة نصية وحيدة، بلا رمز `.`، لا تُكوّن JWT) — **0 مفتاح**.
+- `postgres.` → 7 ملفات (كلها وصف/أسماء مضيف`postgres.example.com`/وثيقة).
+- فحص إضافي: **0** بيانات اعتماد مضمّنة (الموضع الوحيد `user:password@` هو قالب `.env.example`).
+
+## 4) الملفات المعدّلة (Step 4)
+
+`git diff --name-status backup-before-phase4..HEAD` ⇒ **23 ملفًا**: 20 معدّلة، 1 محذوف (`server/src/sqlite.js`)، 3 مُضافة (`server/test/support/sqlite-license.js`, `sqlite-auth.js`, `sqlite-drive.js`). الإجمالي 3 commits على الفرع:
+1. `32148fc` — Phase 4 A: نقل مواضع/DDL SQLite إلى `server/test/support/` وتنظيف المستودعات.
+2. `3b5a78f` — Phase 4 B: `index.js`/`config.js` PostgreSQL-only + فشل سريع + فتحة `adapters` + إزالة `STOREHUB_DB`.
+3. `df04c76` — Phase 4 C: تحييد JSDoc/الوثائق + `.env.example`/`.gitignore`.
+4. (D) — Phase 4 D: الإثباتات + هذا التقرير، ثم دمج `merge --no-ff` إلى `main` محليًا **بدون push**.
+
+## 5) حالة Git والحكم النهائي
+
+- علامة أمان `backup-before-phase4` موجودة قبل أي تغيير.
+- فرع `phase4-remove-sqlite-runtime`: 4 commits فوق `cc02f69`، شجرة عمل نظيفة بعد D.
+- الدمج إلى `main` بـ `merge --no-ff` محليًا؛ **لا push**.
+- لا تعديل على Supabase الحي (لا DDL؛ حذف صفوف `__test_` فقط كان ضمن test:live)، لا تعديل على `.env`، لا حذف ملف بيانات، لا تعديل للواجهة الأمامية أو منطق الأعمال أو عقود الـ API، وكل الإثباتات أ–هـ ناجحة بأرقامها أعلاه.
+
+# ✅ PHASE 4 DONE
