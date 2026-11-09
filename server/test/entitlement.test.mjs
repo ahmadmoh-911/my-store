@@ -280,31 +280,40 @@ test('11. Revoked license → REVOKED, cannot sell', async () => {
   }
 });
 
-test('12. Clock moved backwards significantly → CLOCK_SUSPECT, cannot sell', async () => {
+test('12a. Device clock steadily 81 s fast (real shop case) → still ACTIVE, can sell', async () => {
   setupFakeDB();
+  try {
+    await writeLicenseRecord(baseLicenseRecord());
+    await writeAuthSession(baseAuthSession());
+    // Server says it is 81 s earlier than the device thinks. Nobody touched the clock.
+    setTrustedTime(Date.now() - 81 * 1000);
+    const e = await getEntitlement();
+    assert.notEqual(e.state, ENTITLEMENT_STATE.CLOCK_SUSPECT);
+    assert.equal(e.clockSuspect, false);
+  } finally {
+    teardownFakeDB();
+  }
+});
+
+test('12. Clock moved backwards after verification → CLOCK_SUSPECT, cannot sell', async () => {
+  setupFakeDB();
+  const realNow = Date.now;
   try {
     await writeLicenseRecord(baseLicenseRecord());
     await writeAuthSession(baseAuthSession());
     setTrustedTime(Date.now() - 1000);
 
-    // Simulate clock moved backwards by making estimatedServerTime return
-    // a value that makes isClockSuspect return true.
-    // We do this by setting a trusted time that's far in the future relative to now.
-    // Actually, isClockSuspect compares Date.now() vs estimatedServerTime().
-    // If we set trusted time to far future, then estimatedServerTime will be
-    // far future, Date.now() will be "now", and skew will be negative large.
-    // isClockSuspect uses absolute value, so it will trigger.
-
-    const farFuture = Date.now() + 2 * 60 * 1000; // 2 minutes in future
-    setTrustedTime(farFuture);
+    // The owner winds the device clock back 2 hours after the server time was recorded.
+    const shifted = realNow() - 2 * 60 * 60 * 1000;
+    const startPerf = globalThis.performance.now();
+    Date.now = () => shifted + (globalThis.performance.now() - startPerf);
 
     const e = await getEntitlement();
-    // clockSkewMs = Date.now() - estimatedServerTime() ≈ -2 min
-    // Math.abs(-2min) > 60s → clockSuspect = true
     assert.equal(e.state, ENTITLEMENT_STATE.CLOCK_SUSPECT);
     assert.equal(e.canSell, false);
     assert.equal(e.clockSuspect, true);
   } finally {
+    Date.now = realNow;
     teardownFakeDB();
   }
 });

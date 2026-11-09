@@ -85,6 +85,10 @@ export function setTrustedServerTime(serverTimeMs) {
     anchor: m.value,
     monotonic: m.monotonic,
     recordedAtWall: Date.now(),
+    // How far the device clock was from the server at this moment. A constant
+    // offset is not tampering — plenty of shop devices run a minute or two off.
+    // What matters is the offset CHANGING afterwards (see isClockSuspect).
+    skewAtAnchor: Date.now() - Math.floor(serverTimeMs),
   };
   return true;
 }
@@ -133,19 +137,24 @@ export function clockSkewMs() {
 }
 
 /**
- * True when the device clock is far enough from the server to be suspicious.
+ * True when the device clock has been CHANGED since the server last told us the
+ * time — moved back to stretch the offline grace, or forward.
  *
- * A threshold, not a verdict: a few minutes of drift is normal, and locking a
- * shop out over a 30-second skew would be absurd. The licence phase decides what
- * to do about a large skew; this only reports it.
+ * It compares the device's offset from the server now with its offset when the
+ * server time was recorded. A device that simply runs fast or slow keeps the
+ * same offset and is never flagged: licence timing already uses the server's
+ * clock (estimatedServerTime), so a steady offset cannot extend anything. The
+ * old rule flagged any offset over the tolerance, which locked an honest shop
+ * whose clock was 81 seconds fast out of selling while fully online.
  *
  * @param {number} [toleranceMs=60000]
  * @returns {boolean} false when there is no trusted time to compare against.
  */
 export function isClockSuspect(toleranceMs = 60000) {
   const skew = clockSkewMs();
-  if (skew === NO_TRUSTED_TIME) return false;
-  return Math.abs(skew) > toleranceMs;
+  if (skew === NO_TRUSTED_TIME || !anchor) return false;
+  const base = typeof anchor.skewAtAnchor === 'number' ? anchor.skewAtAnchor : 0;
+  return Math.abs(skew - base) > toleranceMs;
 }
 
 /**
