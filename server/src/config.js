@@ -79,8 +79,23 @@ export function loadEnvFile(into = process.env) {
  * Required in production, defaulted in development so `npm start` works on a
  * fresh clone without ceremony.
  */
+// Placeholder text copied from .env.example is long enough to pass the length
+// check, but it is published in the repository, so using it as the pepper is
+// the same as having no pepper at all.
+const PEPPER_PLACEHOLDER = /random_|your_|change_?me|placeholder|example/i;
+
+export function isPlaceholderPepper(value) {
+  return typeof value === 'string' && PEPPER_PLACEHOLDER.test(value);
+}
+
 function readPepper(env) {
   const fromEnv = env.STOREHUB_PEPPER;
+  if (fromEnv && isPlaceholderPepper(fromEnv) && env.NODE_ENV === 'production') {
+    throw new Error(
+      'STOREHUB_PEPPER is still the placeholder from .env.example. ' +
+        'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+    );
+  }
   if (fromEnv && fromEnv.length >= 16) return fromEnv;
 
   if (env.NODE_ENV === 'production') {
