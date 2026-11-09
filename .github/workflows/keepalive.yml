@@ -1,0 +1,18 @@
+# Keeps the Render free instance awake so the app and admin portal do not take
+# ~50 s to answer after 15 minutes of inactivity (a cold start also drops any
+# Google sign-in that was half-way through). One service running all month fits
+# inside Render's 750 free instance hours. Delete this file after upgrading to a
+# paid instance, which never sleeps.
+name: keep-render-awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        run: curl -fsS --max-time 90 --retry 2 https://storehub-73p4.onrender.com/api/health

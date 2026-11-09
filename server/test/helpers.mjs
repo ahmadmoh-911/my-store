@@ -318,7 +318,7 @@ export async function createTestAdminApp(options = {}) {
 
     /** @param {string} [token] @returns {Record<string,string>} request headers carrying the session */
     cookieHeaders(token) {
-      return { cookie: `storehub_session=${token}` };
+      return { cookie: `storehub_admin_session=${token}` };
     },
 
     close() {

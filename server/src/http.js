@@ -31,28 +31,42 @@ import { createAdminAuthorizer } from './admin-authorization.js';
  * @param {import('node:http').IncomingMessage} req
  * @returns {string|null}
  */
-function extractSessionToken(req) {
+function extractSessionToken(req, name = SESSION_COOKIE) {
   const cookie = req.headers.cookie || '';
-  const match = cookie.match(/(?:^|;\s*)storehub_session=([^;]+)/);
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
   return match ? match[1] : null;
 }
 
+/**
+ * The customer app and the admin portal are served from the same origin, so
+ * they must not share one cookie: signing in to the shop app would replace the
+ * operator's admin session (and logging out of either would end both). Each
+ * plane has its own cookie; the session store behind them is the same.
+ */
+const SESSION_COOKIE = 'storehub_session';
+const ADMIN_SESSION_COOKIE = 'storehub_admin_session';
+
+/** @param {import('node:http').IncomingMessage} req */
+function extractAdminSessionToken(req) {
+  return extractSessionToken(req, ADMIN_SESSION_COOKIE);
+}
+
 /** Sets the session cookie. */
-function setSessionCookie(res, token, config) {
+function setSessionCookie(res, token, config, name = SESSION_COOKIE) {
   const secure = config.env === 'production' ? '; Secure' : '';
   const sameSite = config.env === 'production' ? '; SameSite=None' : '; SameSite=Lax';
   const maxAge = Math.floor(config.session.ttlMs / 1000);
   res.setHeader('set-cookie', [
-    `storehub_session=${token}; HttpOnly; Path=/; Max-Age=${maxAge}${secure}${sameSite}`,
+    `${name}=${token}; HttpOnly; Path=/; Max-Age=${maxAge}${secure}${sameSite}`,
   ]);
 }
 
 /** Clears the session cookie. */
-function clearSessionCookie(res, config) {
+function clearSessionCookie(res, config, name = SESSION_COOKIE) {
   const secure = config.env === 'production' ? '; Secure' : '';
   const sameSite = config.env === 'production' ? '; SameSite=None' : '; SameSite=Lax';
   res.setHeader('set-cookie', [
-    `storehub_session=; HttpOnly; Path=/; Max-Age=0${secure}${sameSite}`,
+    `${name}=; HttpOnly; Path=/; Max-Age=0${secure}${sameSite}`,
   ]);
 }
 
@@ -132,6 +146,7 @@ const ROUTES = Object.freeze([
   { method: 'GET', path: '/api/auth/google/callback', handler: 'authCallback' },
   { method: 'GET', path: '/api/auth/me', handler: 'authMe' },
   { method: 'POST', path: '/api/auth/logout', handler: 'authLogout' },
+  { method: 'POST', path: '/api/admin/auth/logout', handler: 'adminAuthLogout' },
 
   // ---- admin sign-in ----------------------------------------------------
   // Separate from the customer flow so the two entry points stay separately
@@ -626,7 +641,7 @@ export function createRequestHandler(deps) {
   const adminAuthorizer = createAdminAuthorizer({
     authService,
     config,
-    extractSessionToken,
+    extractSessionToken: extractAdminSessionToken,
     log,
   });
 
@@ -939,6 +954,16 @@ export function createRequestHandler(deps) {
         return;
       }
 
+      // Admin sign-out: ends only the admin session and its cookie, so the
+      // shop app open in another tab stays signed in.
+      if (route.handler === 'adminAuthLogout') {
+        const adminToken = extractAdminSessionToken(req);
+        if (adminToken) authService.logout(adminToken);
+        clearSessionCookie(res, config, ADMIN_SESSION_COOKIE);
+        send(res, 200, { ok: true, serverTime: now }, cors);
+        return;
+      }
+
       // Admin endpoints.
       if (route.handler === 'adminAuthStart') {
         const { authUrl, state } = authService.startAuth({ intent: 'admin' });
@@ -986,7 +1011,7 @@ export function createRequestHandler(deps) {
           return;
         }
 
-        setSessionCookie(res, result.sessionToken, config);
+        setSessionCookie(res, result.sessionToken, config, ADMIN_SESSION_COOKIE);
 
         // Only ever to the configured portal URL, never to anything from the
         // request — that is what keeps this from being an open redirect.

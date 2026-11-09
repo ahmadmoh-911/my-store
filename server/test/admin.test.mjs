@@ -202,7 +202,7 @@ test('ADMIN: a forged or stale session cookie is refused', async () => {
   try {
     const garbage = await request(app, '/api/admin/licenses', {
       method: 'GET',
-      headers: { cookie: 'storehub_session=not-a-real-session-token' },
+      headers: { cookie: 'storehub_admin_session=not-a-real-session-token' },
     });
     assert.equal(garbage.status, 401);
 
@@ -1033,7 +1033,7 @@ test('ADMIN SIGN-IN: the callback refuses a customer flow and leaves no session'
       assert.equal(ok.body.account.googleSub, ADMIN_SUB);
       assert.equal(sessionCount(), 1);
       // The session cookie is set, and no token is echoed in the body.
-      assert.ok(String(ok.headers['set-cookie']).includes('storehub_session='));
+      assert.ok(String(ok.headers['set-cookie']).includes('storehub_admin_session='));
       assert.ok(!JSON.stringify(ok.body).includes('sessionToken'));
     } finally {
       globalThis.fetch = original;
@@ -1275,6 +1275,38 @@ test('WIRING: buildApplication assembles a working backend', async () => {
 
     const listed = await request(app, '/api/admin/me', { method: 'GET' });
     assert.equal(listed.status, 401);
+  } finally {
+    app.close();
+  }
+});
+
+test('ADMIN: admin and shop sessions use separate cookies on the same origin', async () => {
+  const app = await createTestAdminApp({ authorizedSubs: [ADMIN_SUB] });
+  try {
+    const adminToken = app.signIn(ADMIN_SUB);
+    const shopToken = app.signIn('shop-owner-sub');
+    const both = { cookie: `storehub_session=${shopToken}; storehub_admin_session=${adminToken}` };
+
+    // The shop cookie alone never opens the admin plane, even for an admin account.
+    const shopOnly = await request(app, '/api/admin/me', {
+      method: 'GET',
+      headers: { cookie: `storehub_session=${app.signIn(ADMIN_SUB)}` },
+    });
+    assert.equal(shopOnly.status, 401);
+
+    assert.equal((await request(app, '/api/admin/me', { method: 'GET', headers: both })).status, 200);
+    const meBefore = await request(app, '/api/auth/me', { method: 'GET', headers: both });
+    assert.equal(meBefore.body.account.googleSub, 'shop-owner-sub');
+
+    // Admin sign-out clears only the admin cookie; the shop stays signed in.
+    const out = await request(app, '/api/admin/auth/logout', { method: 'POST', headers: both, body: {} });
+    assert.equal(out.status, 200);
+    const cleared = String(out.headers['set-cookie']);
+    assert.match(cleared, /storehub_admin_session=;/);
+    assert.doesNotMatch(cleared, /(^|[,\s])storehub_session=/);
+    assert.equal((await request(app, '/api/admin/me', { method: 'GET', headers: both })).status, 401);
+    const meAfter = await request(app, '/api/auth/me', { method: 'GET', headers: both });
+    assert.equal(meAfter.body.authenticated, true);
   } finally {
     app.close();
   }

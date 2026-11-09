@@ -66,7 +66,7 @@
 //       so BUILD must move with it. The cart panel drops the payment picker and
 //       carries the price increase inline.
 // v36 — New test suites added (restock, no-size-products, pdf-export) with mutation proofs; all 2288 tests pass.
-const BUILD = 'v37';
+const BUILD = 'v38';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -400,6 +400,10 @@ self.addEventListener('fetch', (event) => {
   // synthetic 504 fallback below, which the admin portal rendered as an unknown
   // server error. Let the browser talk to the server directly.
   if (url.pathname.startsWith('/api/')) return;
+  // The admin portal is online-only and is not part of the shop's offline
+  // shell. Serving its files stale-while-revalidate meant every redeploy left
+  // the operator on the previous admin.js until a second reload.
+  if (url.pathname.startsWith('/admin/') || url.pathname === '/admin') return;
 
   if (request.mode === 'navigate') {
     event.respondWith(handleNavigate(request));
