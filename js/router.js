@@ -19,6 +19,11 @@ import posScreen from './screens/pos.js';
 import suppliersScreen from './screens/suppliers.js';
 import reportsScreen from './screens/reports.js';
 import settingsScreen from './screens/settings.js';
+import activateScreen from './screens/activate.js';
+import activationRequestScreen from './screens/activation-request.js';
+import interimGateScreen from './screens/interim-gate.js';
+import { isInterim } from './build-config.js';
+import { isInterimUnlocked } from './interim-activation.js';
 
 /* ------------------------------------------------------------------ *
  * Route table — `order` drives the transition direction (back vs forward)
@@ -35,6 +40,12 @@ export const ROUTES = [
   { order: 5, match: /^supplier\/([\w-]+)$/, nav: 'suppliers', screen: suppliersScreen },
   { order: 6, match: /^reports$/, nav: 'reports', screen: reportsScreen },
   { order: 7, match: /^settings$/, nav: 'settings', screen: settingsScreen },
+  { order: 8, match: /^activate$/, nav: null, screen: activateScreen },
+  { order: 8.5, match: /^activation-request$/, nav: null, screen: activationRequestScreen },
+  // The interim build's date-code gate. Present in the route table in every
+  // build (a route that only exists in one build is a route that can 404),
+  // but only ever reached while the gate is locked.
+  { order: 0.5, match: /^interim$/, nav: null, screen: interimGateScreen },
 ];
 
 /**
@@ -170,6 +181,17 @@ export function setLowStockCount(n) {
 
 async function render() {
   const path = getPath();
+
+  // Interim-build guard. While the date code has not been accepted, no screen
+  // other than the gate itself may be drawn — not by tapping a nav item and not
+  // by typing a hash by hand. Guarding here, rather than only at boot, is what
+  // closes the deep-link hole; guarding at boot alone would let `#/pos` in.
+  // It is a one-line branch on a build constant, so the full build never runs it.
+  if (isInterim() && path !== 'interim' && !isInterimUnlocked()) {
+    if (location.hash !== '#/interim') location.replace('#/interim');
+    return;
+  }
+
   const { route, params } = match(path);
 
   // never animate out a screen that is being replaced by itself

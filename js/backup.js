@@ -205,6 +205,7 @@ export const BACKUP_SECTIONS = Object.freeze([
   'supplierInvoices',
   'supplierPayments',
   'stockBatches',
+  'refunds',
 ]);
 
 /** Sections that must be arrays in every valid envelope. */
@@ -234,6 +235,7 @@ export function buildBackupEnvelope(snapshot, meta = {}) {
     supplierInvoices: snapshot.supplierInvoices || [],
     supplierPayments: snapshot.supplierPayments || [],
     stockBatches: snapshot.stockBatches || [],
+    refunds: snapshot.refunds || [],
     settings: snapshot.settings || {},
   });
 

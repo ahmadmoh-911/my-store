@@ -4,17 +4,18 @@
  * nothing is stored pre-aggregated, so a restore/backup always rebuilds
  * identical numbers.
  */
-import { listSales, listProducts, getSettings, stockOf } from './db.js';
+import { listSales, listProducts, getSettings, stockOf, listRefunds } from './db.js';
 import { startOfDay, addDays, sum, groupBy, isoDate, dayKeyOf } from './utils.js';
 
 /** Loads everything a screen usually needs in one round-trip. */
 export async function loadAll() {
-  const [products, sales, settings] = await Promise.all([
+  const [products, sales, settings, refunds] = await Promise.all([
     listProducts(),
     listSales(),
     getSettings(),
+    listRefunds(),
   ]);
-  return { products, sales, settings };
+  return { products, sales, settings, refunds };
 }
 
 /* ------------------------------------------------------------------ *
@@ -49,6 +50,21 @@ export const discountGiven = (sales) => sum(sales, (s) => s.discount || 0);
 /** Profit = revenue − cost of goods (costTotal is captured at sale time). */
 export const profit = (sales) =>
   sales.reduce((t, s) => t + (Number(s.total) - Number(s.costTotal || 0)), 0);
+
+/** Total refunded amount across refund records. */
+export const refundsTotal = (refunds) =>
+  sum(refunds, (r) => Number(r.totalRefunded || 0));
+
+/** Total cost of goods refunded. */
+export const refundsCostTotal = (refunds) =>
+  sum(refunds, (r) => Number(r.costTotalRefunded || 0));
+
+/** Net revenue = gross revenue − refunds. */
+export const netRevenue = (sales, refunds) => revenue(sales) - refundsTotal(refunds);
+
+/** Net profit = gross profit − refunded profit. */
+export const netProfit = (sales, refunds) =>
+  profit(sales) - (refundsTotal(refunds) - refundsCostTotal(refunds));
 
 export const avgBasket = (sales) => (sales.length ? revenue(sales) / sales.length : 0);
 

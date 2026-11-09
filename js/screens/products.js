@@ -151,6 +151,11 @@ export function render() {
   root._sortBtn = sortBtn;
   root._filterBtn = filterBtn;
 
+  // Entering the screen re-reads the shelf: a restock or a sale that happened
+  // on another screen (e.g. the dashboard's quick restock) must show here the
+  // moment the screen opens, not after some other change happens to clear
+  // this module cache. paint() refills it from IndexedDB.
+  invalidate();
   paint(root);
   return root;
 }
@@ -416,7 +421,7 @@ function productCard(p, cur, threshold, index) {
 
   const restock = (e) => {
     e.stopPropagation();
-    openRestockSheet(p, { onDone: () => paint() });
+    openRestockSheet(p, { onDone: () => { invalidate(); paint(); } });
   };
   const edit = (e) => {
     e.stopPropagation();
@@ -483,7 +488,7 @@ function productRow(p, cur, threshold, index) {
 
   const restock = (e) => {
     e.stopPropagation();
-    openRestockSheet(p, { onDone: () => paint() });
+    openRestockSheet(p, { onDone: () => { invalidate(); paint(); } });
   };
   const edit = (e) => {
     e.stopPropagation();
@@ -536,7 +541,7 @@ function productRow(p, cur, threshold, index) {
         {},
         el('button.pill-btn.pill-btn--sm.pill-btn--restock', {
           type: 'button',
-          onClick: (e) => { e.stopPropagation(); openRestockSheet(p, { onDone: () => paint() }); },
+          onClick: (e) => { e.stopPropagation(); openRestockSheet(p, { onDone: () => { invalidate(); paint(); } }); },
         }, fromHTML(icon('box')), el('span', { text: 'تجديد' })),
         el('button.pill-btn.pill-btn--sm.pill-btn--view', { type: 'button', onClick: view },
           fromHTML(icon('eye')), el('span', { text: 'عرض' })),
@@ -701,9 +706,21 @@ async function handleScan(root) {
   navigate('product/new');
 }
 
-/** Re-read products after a change elsewhere (e.g. after saving a product). */
+/** Fired whenever the cached product list is declared stale (save, delete, restock, sale). */
+export const PRODUCTS_CHANGED_EVENT = 'storehub:products-changed';
+
+/**
+ * Re-read products after a change elsewhere (e.g. after saving a product).
+ *
+ * Every screen that keeps its own copy of the list listens to the broadcast
+ * fired here — the POS screen's module cache was the copy that never heard
+ * about a change, so new quantities only reached the till after closing the
+ * app. Guarded because this module is also loaded under node tests, where
+ * there is no window.
+ */
 export function invalidate() {
   cache = { products: [], settings: null };
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(PRODUCTS_CHANGED_EVENT));
 }
 
 export default { render };

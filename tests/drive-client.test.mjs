@@ -292,7 +292,7 @@ function envelope(overrides = {}) {
     createdAt: '2026-03-01T00:00:00.000Z',
     appVersion: '1.0.0',
     media: { included: false, policy: 'images excluded by design' },
-    counts: { products: 1, sales: 1, purchases: 0, suppliers: 1, supplierInvoices: 0, supplierPayments: 0 },
+    counts: { products: 1, sales: 1, purchases: 0, suppliers: 1, supplierInvoices: 0, supplierPayments: 0, refunds: 0 },
     data: {
       products: [{ id: 'p1', name: 'قميص', price: 50, qty: 4 }],
       sales: [{ id: 's1', total: 100, items: [{ productId: 'p1', qty: 2 }] }],
@@ -300,6 +300,7 @@ function envelope(overrides = {}) {
       suppliers: [{ id: 'sup1', name: 'مورد' }],
       supplierInvoices: [],
       supplierPayments: [],
+      refunds: [],
       settings: { key: 'app', storeName: 'محلي' },
     },
     ...overrides,

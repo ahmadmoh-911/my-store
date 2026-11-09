@@ -20,6 +20,8 @@ import { mountCartBar, cartAffordanceVisible, openCart } from './cart-bar.js';
 import { isNative, onNativeBack, minimizeApp } from './native.js';
 import { platformInfo } from './platform.js';
 import { getEntitlement, getEntitlementMessage, needsOnlineVerification, verifyAndUpdate, ENTITLEMENT_STATE } from './entitlement.js';
+import { isInterim } from './build-config.js';
+import { refreshInterimGate } from './interim-activation.js';
 import { isAuthenticatedLocally, getCurrentAccount } from './auth-client.js';
 
 /* ------------------------------------------------------------------ *
@@ -524,17 +526,55 @@ async function boot() {
   buildTopbar();
   paintStoreName();
 
-  // Check licence entitlement early (non-blocking for UI, but logged)
-  // The result is used by checkout.js for enforcement.
+  // ── Licence / interim gate ───────────────────────────────────────────────
   //
-  // The same result is also what decides whether a Google Drive backup is
-  // allowed to run, so it is threaded through rather than read twice: two calls
-  // could disagree about entitlement if one of them landed after a clock change.
-  checkEntitlementOnStartup()
-    .then((entitlement) => runScheduledBackup(entitlement))
-    .catch((err) => {
-      console.error('[boot] Entitlement check failed:', err);
-    });
+  // In the interim build there is no server to reach, so NOTHING on this launch
+  // path may touch the network: no licence check, no `drive/status`, no
+  // `auth/me`. Skipping the whole entitlement block is what keeps the app
+  // silent about a backend it was never built to talk to, and what guarantees a
+  // missing server can never surface as an error over the screen.
+  //
+  // What replaces it is a local date-code gate with no network of any kind. It
+  // touches nothing but its own storage record — never the shop's data.
+  const interimLocked = isInterim() ? !refreshInterimGate().active : false;
+
+  if (!isInterim()) {
+    // Check licence entitlement early (non-blocking for UI, but logged)
+    // The result is used by checkout.js for enforcement.
+    //
+    // The same result is also what decides whether a Google Drive backup is
+    // allowed to run, so it is threaded through rather than read twice: two calls
+    // could disagree about entitlement if one of them landed after a clock change.
+    checkEntitlementOnStartup()
+      .then((entitlement) => {
+        if (entitlement && entitlement.state && !['active', 'active_needs_verification', 'offline_grace'].includes(entitlement.state)) {
+          try {
+            const path = getPath();
+            if (!path || !path.startsWith('activate')) {
+              navigate('activate');
+            }
+          } catch {}
+        }
+        return runScheduledBackup(entitlement);
+      })
+      .catch((err) => {
+        console.error('[boot] Entitlement check failed:', err);
+        try {
+          navigate('activate');
+        } catch {}
+      });
+  }
+
+  // Pick the first screen before the router starts, so the gate is the first
+  // thing painted rather than a flash of the dashboard before a redirect. The
+  // router's own guard is the second layer, for a deep link typed by hand.
+  if (interimLocked) {
+    try {
+      location.replace('#/interim');
+    } catch {
+      /* a failed hash write must not stop the boot */
+    }
+  }
 
   // The cart lives in document.body, outside #view, so a sale in progress
   // survives every navigation. Mounted before the first screen so it is never
@@ -562,7 +602,7 @@ async function boot() {
   });
 
   // render the first screen before revealing the shell so there's no flash
-  renderNav('dashboard');
+  renderNav(interimLocked ? 'interim' : 'dashboard');
   await startRouter();
 
   shell.hidden = false;

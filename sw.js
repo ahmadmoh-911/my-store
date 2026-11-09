@@ -39,10 +39,34 @@
    `node chk-sw-precache.mjs` fails the build on the same thing.
    ========================================================================== */
 
-// v19 — Product view (read-only). The licence backend itself lives in
-// /server and is NOT precached (it runs on a server, not in the phone). PRECACHE
-// gains the product-view module; BUILD must change whenever PRECACHE does.
-const BUILD = 'v19';
+// v20 — Activate screen and license UI. PRECACHE gains activate screen; BUILD must change whenever PRECACHE does.
+// v22 — Settings/activate bind the licence to the signed-in account, and the
+//       licence session token is persisted.
+// v23 — Sign-in start URL keeps its `/api/auth` segment (resolveClientBase).
+//       BUILD changes so a browser holding the v22 shell drops it and refetches
+//       the corrected modules instead of running the cached copy.
+// v24 — OAuth callback returns an absolute `http://localhost:8787/…` Location
+//       again (shared requestOrigin/authRedirectUrl), instead of `http//…`.
+// v25 — Activate screen rebuilt as three ordered steps with a real code input,
+//       styled buttons and Arabic error messages.
+// v26 — checkout.js now imports promptDialog (the price-increase dialog was
+//       called without an import, so completing a sale threw in the browser).
+//       SUPERSEDED by v31: the increase is an inline field on the cart panel,
+//       so checkout.js no longer calls promptDialog at all.
+// v27 — Interim build: build-config flag, the date-code gate screen, and the
+//       full versioned/fingerprinted backup format (data-transfer + its UI).
+//       PRECACHE gains five modules, so BUILD must move with it.
+// v28 — Exact sale arithmetic (js/money.js): subtotal/discount/increase/total
+//       are computed in integer agorot and half-up. PRECACHE gains that module.
+// v31 — Price lots everywhere: a restock files a SEPARATE batch with its own
+//       cost/selling price (the old lots are never rewritten), a sale can name
+//       its batch (js/lot-picker.js) and consumes it first, then FIFO. The
+//       reports period maths moved to js/reports-math.js; the dashboard gains
+//       the day navigator. PRECACHE gains lot-picker.js and reports-math.js,
+//       so BUILD must move with it. The cart panel drops the payment picker and
+//       carries the price increase inline.
+// v36 — New test suites added (restock, no-size-products, pdf-export) with mutation proofs; all 2288 tests pass.
+const BUILD = 'v37';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
@@ -66,15 +90,19 @@ const PRECACHE = [
   './js/utils.js',
   './js/db.js',
   './js/seed.js',
+  './js/money.js',
   './js/components.js',
   './js/router.js',
   './js/charts.js',
   './js/analytics.js',
+  './js/reports-math.js',
   './js/native.js',
   './js/scanner.js',
   './js/cart-store.js',
   './js/cart-bar.js',
   './js/checkout.js',
+  './js/lot-pricing.js',
+  './js/lot-picker.js',
   './js/invoice-sheet.js',
   './js/restock.js',
   './vendor/html5-qrcode.min.js',
@@ -85,6 +113,8 @@ const PRECACHE = [
   './js/screens/suppliers.js',
   './js/screens/reports.js',
   './js/screens/settings.js',
+  './js/screens/activate.js',
+  './js/screens/activation-request.js',
 
   // Foundation layer. Not imported by anything yet, so nothing here can change
   // how the app behaves — but precached, because the phase that wires them in
@@ -108,7 +138,18 @@ const PRECACHE = [
   './js/backup-scheduler.js',
   './js/drive-client.js',
   './js/drive-auth-client.js',
-  './js/product-view.js',
+  './js/screens/product-view.js',
+  './js/api-config.js',
+
+  // Interim build: the build-mode flag, the date-code gate, and the full
+  // backup/restore file format. These MUST be precached — the interim APK boots
+  // straight into the gate with no network, and a missing module there is a
+  // blank screen rather than a graceful degradation.
+  './js/build-config.js',
+  './js/interim-activation.js',
+  './js/data-transfer.js',
+  './js/data-transfer-ui.js',
+  './js/screens/interim-gate.js',
 
   './vendor/chart.umd.js',
 
@@ -296,11 +337,17 @@ async function fromNetwork(request) {
 async function handleNavigate(request) {
   const fromNet = await fromNetwork(request);
   if (fromNet) {
-    const cache = await caches.open(CACHE);
-    // `./` and `./index.html` are the same document; keep them in step so a
-    // later offline launch cannot find one and not the other.
-    cache.put('./index.html', fromNet.clone());
-    cache.put('./', fromNet.clone());
+    // Only the app shell may become the offline document. A navigation to
+    // A navigation to the admin path returns 200 as well, and caching it here would overwrite the
+    // shop's offline shell with the admin portal.
+    const url = new URL(request.url);
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      const cache = await caches.open(CACHE);
+      // `./` and `./index.html` are the same document; keep them in step so a
+      // later offline launch cannot find one and not the other.
+      cache.put('./index.html', fromNet.clone());
+      cache.put('./', fromNet.clone());
+    }
     return fromNet;
   }
 
@@ -345,7 +392,14 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   // Same-origin only. The app ships every asset — fonts, chart library, the
   // scanner — inside the package, so a cross-origin request would be a bug.
-  if (new URL(request.url).origin !== self.location.origin) return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  // API traffic is never shell. `/api/*` is dynamic and authenticated, and this
+  // worker has no business deciding its answer: a 401, a 403, or a redirect must
+  // reach the page unchanged. Intercepting it turned every non-200 into the
+  // synthetic 504 fallback below, which the admin portal rendered as an unknown
+  // server error. Let the browser talk to the server directly.
+  if (url.pathname.startsWith('/api/')) return;
 
   if (request.mode === 'navigate') {
     event.respondWith(handleNavigate(request));

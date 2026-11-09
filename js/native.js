@@ -58,9 +58,22 @@ function plugin(name) {
  * The whole live DOM is serialised on purpose: the app's own @media print rules
  * decide what shows, which is the same contract the desktop print path relies
  * on. Passing a stripped-down fragment instead would silently drop the layout.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.html] — custom HTML document to print (for clean PDF export).
+ *   If omitted, the current document is printed (legacy behaviour).
+ * @param {string} [opts.jobName] — print job name.
  */
-export async function printPage() {
+export async function printPage({ html, jobName } = {}) {
   if (!isNative()) {
+    if (html) {
+      // Browser: open a print-only window with the custom HTML
+      const w = window.open('', '_blank', 'width=800,height=600');
+      w.document.write(html);
+      w.document.close();
+      w.onload = () => w.print();
+      return;
+    }
     window.print();
     return;
   }
@@ -68,13 +81,20 @@ export async function printPage() {
   const p = plugin('NativePrint');
   if (!p) {
     console.warn('[native] NativePrint plugin missing — falling back to window.print()');
-    window.print();
+    if (html) {
+      const w = window.open('', '_blank', 'width=800,height=600');
+      w.document.write(html);
+      w.document.close();
+      w.onload = () => w.print();
+    } else {
+      window.print();
+    }
     return;
   }
 
-  const label = (document.getElementById('topbar-context')?.textContent || 'Store Hub').trim();
+  const label = jobName || (document.getElementById('topbar-context')?.textContent || 'Store Hub').trim();
   await p.print({
-    html: '<!doctype html>\n' + document.documentElement.outerHTML,
+    html: html || '<!doctype html>\n' + document.documentElement.outerHTML,
     jobName: label,
   });
 
@@ -106,12 +126,33 @@ export async function saveBlob(blob, filename) {
   const fs = plugin('Filesystem');
   if (!fs) return false;
 
-  const written = await fs.writeFile({
-    path: filename,
-    data: await toBase64(blob),
-    directory: 'Documents',
-    recursive: true,
-  });
+  // The public `Documents` folder needs storage permissions Android 10+ no
+  // longer grants by default, so the write there would fail and the export
+  // would be announced as broken. Write inside the app's own space instead —
+  // no permission required on any Android version — and hand the file to the
+  // share sheet, which is how the owner actually gets it out of the phone.
+  // Both folders are covered by the FileProvider paths already in the manifest
+  // (app/src/main/res/xml/file_paths.xml), so sharing either one works.
+  const targets = ['External', 'Cache'];
+  let written = null;
+  let lastError = null;
+  for (const directory of targets) {
+    try {
+      written = await fs.writeFile({
+        path: filename,
+        data: await toBase64(blob),
+        directory,
+        recursive: true,
+      });
+      break;
+    } catch (err) {
+      lastError = err;
+      written = null;
+    }
+  }
+  if (!written) {
+    throw lastError || new Error('could not write the file on the device');
+  }
 
   const share = plugin('Share');
   if (share) {

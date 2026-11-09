@@ -38,9 +38,24 @@
 // the dashboard, the reports and the POS sequence. utils.js reaches only
 // icons.js and native.js, so this adds no cycle.
 import { dayKeyOf } from './utils.js';
+// Exact sale arithmetic (integer micro-units, halves up) — the single
+// implementation of subtotal/discount/increase/total, shared by createSale,
+// updateSale and importAll so a record and its restored copy agree to the
+// agora. See js/money.js for the rounding rules and why floats cannot do it.
+import {
+  saleTotals,
+  toMicro,
+  microToAgorot,
+  lotsCostMicro,
+  microToDecimal,
+} from './money.js';
+// «سعر البيع يتبع الدفعة»: توزيع الكمية على الدفعات الأقدم أولًا (أو المختارة
+// أولًا) وتجميع المأخوذات حسب سعر بيع كل دفعة. الوحدة نقية (بلا IndexedDB)
+// ويستعملها أيضًا checkout.js لمعاينة الإجمالي، واختبارات node.
+import { allocateLots, groupTakesByPrice, lotsOf, takeWithoutLots } from './lot-pricing.js';
 
 export const DB_NAME = 'saher_db';
-export const DB_VERSION = 5;
+export const DB_VERSION = 6;
 
 export const STORES = {
   products: 'products',
@@ -52,6 +67,10 @@ export const STORES = {
   settings: 'settings',
   // Stock batches (price lots) for FIFO inventory valuation
   stockBatches: 'stockBatches',
+  // Refund records — one per refund operation, linked to the original sale.
+  // A refund never deletes its sale; the original invoice stays intact for
+  // audit, and the refund record carries the quantities, amounts and timing.
+  refunds: 'refunds',
 };
 
 /* ------------------------------------------------------------------ *
@@ -206,6 +225,20 @@ export function openDB() {
         };
       }
 
+      // v6 — refunds store: refunds are separate records linked to the
+      // original sale, never a deletion of the sale itself. This preserves
+      // the audit trail, supports partial refunds, and lets reports show
+      // gross sales vs refunds vs net sales.
+      if (e.oldVersion < 6) {
+        if (!db.objectStoreNames.contains(STORES.refunds)) {
+          const s = db.createObjectStore(STORES.refunds, { keyPath: 'id' });
+          s.createIndex('originalSaleId', 'originalSaleId');
+          s.createIndex('refundDate', 'refundDate');
+          s.createIndex('status', 'status');
+        }
+        console.log('[db] upgraded to version 6 — refunds store created');
+      }
+
       console.log('[db] upgraded to version', e.oldVersion, '→', DB_VERSION);
     };
 
@@ -245,22 +278,52 @@ function tx(store, mode, run) {
   );
 }
 
-/** Multi-store transaction — used when a sale must update sales + products together. */
+/**
+ * Multi-store transaction — used when a sale must update several stores as one
+ * unit (sales + products + stockBatches, say).
+ *
+ * `run(store, t, fail)` must issue every request synchronously; when all reads
+ * resolve it may plan the outcome in memory and issue the writes, all still
+ * inside the same transaction. `fail(err)` aborts the whole transaction — the
+ * ONLY way out that leaves nothing behind — and the returned promise rejects
+ * with that error once the abort has been observed. Either every write lands or
+ * none does, which is what lets a sale, its stock movement and its FIFO lots
+ * never drift apart.
+ *
+ * The promise resolves only on `oncomplete`, so a caller that awaits it knows
+ * the data is committed.
+ */
 function multiTx(stores, mode, run) {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
         const t = db.transaction(stores, mode);
         let out;
+        let failure = null;
+        // Abort first, reject after: the transaction's own onabort is the single
+        // place the rejection is issued from, so a caller can never see a
+        // resolved promise for a transaction that was rolled back.
+        const fail = (err) => {
+          if (failure) return;
+          failure = err instanceof Error ? err : new Error(String(err || 'transaction failed'));
+          try {
+            t.abort();
+          } catch {
+            reject(failure);
+          }
+        };
         try {
-          out = run(t.objectStore.bind(t), t);
+          out = run(t.objectStore.bind(t), t, fail);
         } catch (err) {
+          // A synchronous throw may have left requests queued; abort so none of
+          // them can commit without the rest.
+          try { t.abort(); } catch { /* already finished */ }
           reject(err);
           return;
         }
         t.oncomplete = () => resolve(out);
-        t.onerror = () => reject(t.error);
-        t.onabort = () => reject(t.error || new Error('transaction aborted'));
+        t.onerror = () => reject(failure || t.error || new Error('transaction failed'));
+        t.onabort = () => reject(failure || t.error || new Error('transaction aborted'));
       })
   );
 }
@@ -307,8 +370,15 @@ export const listProducts = () => getAll(STORES.products);
 
 export async function saveProduct(product) {
   const now = new Date().toISOString();
+  const id = product.id || cryptoId();
+  // "New" means the store holds no product under this id — not "the caller
+  // left the id empty". The product form mints the id before the first save
+  // (hydrate: `id: p?.id || uid()`), so judging by a missing id filed opening
+  // lots for nobody and would file them *again* on every edit. Reading the
+  // record first distinguishes the two for real: only a first save seeds lots.
+  const isNew = !(await get(STORES.products, id));
   const rec = {
-    id: product.id,
+    id,
     name: product.name,
     sku: product.sku || '',
     category: product.category || 'غير مصنف',
@@ -329,7 +399,9 @@ export async function saveProduct(product) {
     updatedAt: now,
   };
   await put(STORES.products, rec);
-  await createInitialStockBatches(rec);
+  if (isNew) {
+    await createInitialStockBatches(rec);
+  }
 }
 
 export const deleteProduct = (id) => del(STORES.products, id);
@@ -385,6 +457,41 @@ export const deletePurchase = (id) => del(STORES.purchases, id);
  * @returns {Promise<{record: object, written: Array}>}
  */
 export function createPurchase(po) {
+  return purchaseCore(po, false);
+}
+
+/**
+ * "تجديد الكمية" — the restock path.
+ *
+ * Identical to `createPurchase` except the stock batches are written in the
+ * SAME transaction as the product variants and the purchase row. The UI used to
+ * call `addStockBatch` once per line and then `createPurchase` — two stores, two
+ * transactions — so a failure between them could raise the shelf (and FIFO
+ * lots) without debiting the store balance, or bill a purchase whose stock
+ * never landed. One transaction makes that impossible: the restock is all-or-
+ * nothing, and the batches and variants can never disagree.
+ *
+ * @param {object} po  same shape as createPurchase
+ * @returns {Promise<{record: object, written: Array}>}
+ */
+export function restockProduct(po) {
+  return purchaseCore(po, true);
+}
+
+/**
+ * The shared restock/purchase writer.
+ *
+ * The money half is written INSIDE the transaction, after the stock half has
+ * resolved which variants actually exist. Billing the requested lines instead
+ * would debit the store balance for pieces that never arrived — the ledger
+ * would say we paid for stock we do not have, which is the one thing this
+ * ledger exists to prevent.
+ *
+ * @param {object} po
+ * @param {boolean} withBatches  also file a FIFO lot per landed line
+ * @returns {Promise<{record: object, written: Array}>}
+ */
+function purchaseCore(po, withBatches) {
   const lines = (po.lines || [])
     .map((l) => ({
       size: l.size || '',
@@ -402,11 +509,6 @@ export function createPurchase(po) {
       ? null
       : round2(nonNeg(po.newPrice));
 
-  // The money half is written INSIDE the transaction, after the stock half has
-  // resolved which variants actually exist. Billing the requested lines instead
-  // would debit the store balance for pieces that never arrived — the ledger
-  // would say we paid for stock we do not have, which is the one thing this
-  // ledger exists to prevent.
   const record = {
     id: po.id || cryptoId(),
     productId: po.productId,
@@ -423,7 +525,11 @@ export function createPurchase(po) {
     createdAt: new Date().toISOString(),
   };
 
-  return multiTx([STORES.products, STORES.purchases], 'readwrite', (store) => {
+  const stores = withBatches
+    ? [STORES.products, STORES.purchases, STORES.stockBatches]
+    : [STORES.products, STORES.purchases];
+
+  return multiTx(stores, 'readwrite', (store) => {
     const productsStore = store(STORES.products);
     const written = [];
     const req = productsStore.get(po.productId);
@@ -432,12 +538,33 @@ export function createPurchase(po) {
       const now = new Date().toISOString();
 
       if (p) {
+        const sellingPrice = newPrice !== null ? newPrice : (Number(p.price) || 0);
         for (const l of lines) {
           // exact variant only — never fold one size/colour into another
-          const v = (p.variants || []).find((x) => (x.size || '') === l.size && (x.color || '') === l.color);
-          if (!v) continue;
+          let v = (p.variants || []).find((x) => (x.size || '') === l.size && (x.color || '') === l.color);
+          if (!v) {
+            // New size/color combination — add it to the product
+            v = { size: l.size || '', color: l.color || '', quantity: 0 };
+            if (!p.variants) p.variants = [];
+            p.variants.push(v);
+          }
           v.quantity = Math.max(0, (Number(v.quantity) || 0) + l.qty);
           written.push(l);
+          if (withBatches) {
+            // The lot is created for exactly the pieces that landed, so the
+            // FIFO book and the variant counters stay in step.
+            store(STORES.stockBatches).put({
+              id: cryptoId(),
+              productId: po.productId,
+              variantKey: `${l.size || ''}|${l.color || ''}`,
+              size: l.size || '',
+              color: l.color || '',
+              quantity: l.qty,
+              costPrice: unitCost,
+              sellingPrice,
+              createdAt: now,
+            });
+          }
         }
         if (written.length) {
           if (unitCost > 0) p.costPrice = unitCost;
@@ -469,16 +596,16 @@ export function createPurchase(po) {
  * refund (which deletes its sale) and an edited sale total are already
  * reflected. Nothing here is stored, so it cannot disagree with the data.
  */
-export function storeLedger(sales, purchases, settings) {
+export function storeLedger(sales, purchases, settings, refunds = []) {
   const opening = round2(Number(settings?.openingBalance) || 0);
   const salesTotal = round2((sales || []).reduce((t, s) => t + (Number(s.total) || 0), 0));
   const purchasesTotal = round2((purchases || []).reduce((t, p) => t + (Number(p.total) || 0), 0));
+  const refundsTotal = round2((refunds || []).reduce((t, r) => t + (Number(r.totalRefunded) || 0), 0));
 
   /* The trace. Every line here is a real record that exists in the database —
    * there is no synthetic "expenses" row, because the app does not pretend to
-   * do accounting it cannot do. A refunded sale does not appear here as a
-   * reversal: `refundSale` deletes the sale, so the reversal IS the sale's
-   * absence, and the balance below already reflects it. */
+   * do accounting it cannot do. Refunds are separate records now: the original
+   * sale stays intact and the refund appears as its own negative entry. */
   const entries = [];
   if (opening) {
     entries.push({
@@ -514,6 +641,18 @@ export function storeLedger(sales, purchases, settings) {
       ref: s.id,
     });
   }
+  for (const r of refunds || []) {
+    const amount = round2(Number(r.totalRefunded) || 0);
+    if (!amount) continue;
+    entries.push({
+      type: 'refund',
+      label: r.originalReceiptNo ? `استرجاع — فاتورة ${r.originalReceiptNo}` : 'استرجاع فاتورة',
+      date: r.refundDate || null,
+      amount,
+      sign: -1,
+      ref: r.id,
+    });
+  }
   entries.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
   let run = 0;
   for (const e of entries) {
@@ -525,19 +664,21 @@ export function storeLedger(sales, purchases, settings) {
     opening,
     salesTotal,
     purchasesTotal,
-    balance: round2(opening + salesTotal - purchasesTotal),
+    refundsTotal,
+    balance: round2(opening + salesTotal - purchasesTotal - refundsTotal),
     entries,
   };
 }
 
 /** Convenience wrapper — the number every screen shows. */
 export async function storeBalance() {
-  const [sales, purchases, settings] = await Promise.all([
+  const [sales, purchases, settings, refunds] = await Promise.all([
     listSales(),
     listPurchases(),
     getSettings(),
+    listRefunds(),
   ]);
-  return storeLedger(sales, purchases, settings).balance;
+  return storeLedger(sales, purchases, settings, refunds).balance;
 }
 
 /* ------------------------------------------------------------------ *
@@ -546,12 +687,138 @@ export async function storeBalance() {
 
 export const listSales = () => getAll(STORES.sales);
 
+/** Refund records — separate audit entries linked to original sales. */
+export const listRefunds = () => getAll(STORES.refunds);
+
+/* ------------------------------------------------------------------ *
+ * In-transaction stock planning
+ *
+ * A sale, an edit and a refund all have to touch the invoice, the product
+ * variants and the FIFO lots together. The functions below let that happen
+ * inside ONE IndexedDB transaction: `readStock` gathers what is needed, then
+ * hands plain arrays to a synchronous planner that decides the outcome and
+ * issues the writes. Nothing here opens its own transaction — doing so was the
+ * old defect, where lots could be consumed and then a later write could fail,
+ * leaving stock gone with no invoice (or the reverse).
+ * ------------------------------------------------------------------ */
+
+/**
+ * Takes `qty` pieces off one variant's lots, oldest first, MUTATING the lot
+ * records in `lots`. Returns the takes that a sale records; throws when the
+ * lots are short, having changed nothing — so the caller can abort a whole
+ * transaction without a manual undo.
+ *
+ * The allocation itself is the pure `allocateLots` in js/lot-pricing.js (FIFO,
+ * or the owner's chosen batch served first); this wrapper is only the mutation:
+ * it applies the plan to `lots` and returns the takes. Keeping one algorithm in
+ * the pure module means the checkout preview and the stored sale cannot drift.
+ *
+ * @returns {Array<{batchId:string, qty:number, costPrice:number, sellingPrice:number}>}
+ */
+function takeLots(lots, productId, variantKey, qty, preferredLotId) {
+  const taken = allocateLots(lots, productId, variantKey, qty, preferredLotId);
+  for (const t of taken) {
+    const b = lots.find((x) => x.id === t.batchId);
+    if (b) b.quantity = (Number(b.quantity) || 0) - t.qty;
+  }
+  return taken;
+}
+
+/** Puts `qty` pieces back into a named lot, if it still exists. */
+function returnToLot(lots, batchId, qty) {
+  const b = lots.find((x) => x.id === batchId);
+  if (b) b.quantity = (Number(b.quantity) || 0) + (Number(qty) || 0);
+  return !!b;
+}
+
+/** A brand-new lot record — used when the original lot is unknown. */
+function freshLot(spec) {
+  return {
+    id: cryptoId(),
+    productId: spec.productId,
+    variantKey: `${spec.size || ''}|${spec.color || ''}`,
+    size: spec.size || '',
+    color: spec.color || '',
+    quantity: Math.max(0, Math.round(Number(spec.qty) || 0)),
+    costPrice: Number(spec.costPrice) || 0,
+    sellingPrice: Number(spec.sellingPrice) || 0,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+/** The exact cost of one line's FIFO takes, in micro-units (BigInt). */
+const lineCostMicro = (taken) => lotsCostMicro(taken);
+
+/** That exact cost rounded to whole agorot — the figure the sale stores. */
+const lineCostAgorot = (taken) => microToAgorot(lineCostMicro(taken));
+
+/** Per-piece cost for display (six decimals at most), from the exact line cost. */
+function lineUnitCost(taken, qty) {
+  const n = Math.round(Number(qty) || 0);
+  if (n <= 0) return 0;
+  return Number(microToDecimal(lineCostMicro(taken) / BigInt(n)));
+}
+
+/**
+ * Reads, inside transaction `t`, every product, every FIFO lot of every named
+ * variant, and any lot named by id, then calls `finish(lots, products)` once —
+ * still inside the transaction, so the caller can plan and write before it
+ * commits. A read error aborts the whole transaction.
+ *
+ * @param {(name:string)=>IDBObjectStore} store  `t.objectStore` already bound
+ * @param {{productIds?:string[], variants?:string[], lotIds?:string[]}} needs
+ * @param {(lots:Array, products:Map<string,object>)=>void} finish
+ * @param {(err:any)=>void} fail
+ */
+function readStock(store, needs, finish, fail) {
+  const ids = [...new Set((needs.productIds || []).filter(Boolean))];
+  const keys = [...new Set((needs.variants || []).filter(Boolean))];
+  const lotIds = [...new Set((needs.lotIds || []).filter(Boolean))];
+  const lotsById = new Map();
+  const products = new Map();
+  const addLot = (b) => { if (b && b.id != null) lotsById.set(b.id, b); };
+  let waiting = ids.length + keys.length + lotIds.length;
+  const tick = () => { if (waiting > 0 && --waiting === 0) finish([...lotsById.values()], products); };
+
+  for (const pid of ids) {
+    const r = store(STORES.products).get(pid);
+    r.onsuccess = () => { if (r.result) products.set(pid, r.result); tick(); };
+    r.onerror = () => fail(r.error);
+  }
+  for (const vk of keys) {
+    const r = store(STORES.stockBatches).index('variantKey').getAll(vk);
+    r.onsuccess = () => { for (const b of r.result) addLot(b); tick(); };
+    r.onerror = () => fail(r.error);
+  }
+  for (const bid of lotIds) {
+    const r = store(STORES.stockBatches).get(bid);
+    r.onsuccess = () => { addLot(r.result); tick(); };
+    r.onerror = () => fail(r.error);
+  }
+  if (waiting === 0) finish([...lotsById.values()], products);
+}
+
 /**
  * Records a sale and decrements stock in ONE transaction, so the two can
  * never drift apart if something fails halfway.
  *
+ * The invoice row, the product variants and the FIFO lots are all written
+ * inside a single `readwrite` transaction: the lots are planned in memory from
+ * a consistent snapshot and the writes are issued together. If stock runs out
+ * (or any read fails) the transaction is aborted and NOTHING is stored — there
+ * is no window in which stock left the shelf without an invoice, or an invoice
+ * was filed without its cost.
+ *
  * @param {object} sale
- * @param {Array}  sale.items [{productId, size, color, qty, price, costPrice, name}]
+ * @param {Array}  sale.items [{productId, size, color, qty, price, costPrice, name,
+ *                             lotId?}] — `lotId` (optional) names the stock batch the
+ *                             owner chose for the line: it is consumed first and the
+ *                             remainder falls back to FIFO. Omitted (the default) is
+ *                             pure FIFO, exactly as it has always been. `price` is
+ *                             IGNORED for the stored line: the selling price follows
+ *                             the batch (Option A), and a line whose quantity spans
+ *                             several batches at different prices is SPLIT into one
+ *                             stored line per price.
  * @returns {Promise<object>} the stored sale (with id / receiptNo assigned)
  */
 export async function createSale(sale) {
@@ -569,97 +836,164 @@ export async function createSale(sale) {
       qty: nonNegInt(it.qty),
       price: nonNeg(it.price),
       costPrice: nonNeg(it.costPrice),
+      // Optional per-line batch choice (the lot-picker): the sale consumes THIS
+      // lot first, then FIFO for whatever it could not cover. The id itself is
+      // deliberately NOT stored on the invoice line — the takes land in
+      // `stockBatchesConsumed` with each lot's real cost and selling price, so
+      // the stored line keeps its exact legacy shape and an old reader (and an
+      // old backup) sees nothing new.
+      lotId: it.lotId == null || it.lotId === '' ? null : String(it.lotId),
     }))
     .filter((it) => it.qty > 0);
 
-  const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
+  // Exact totals are computed INSIDE the transaction, from the lot-priced
+  // lines (see below): the price of each line is the selling price of the batch
+  // it actually consumed, so the subtotal cannot be known until the batches are.
   const discountValue = nonNeg(sale.discountValue);
-  const discount =
-    sale.discountType === 'percent'
-      ? round2((subtotal * Math.min(discountValue, 100)) / 100)
-      : Math.min(round2(discountValue), subtotal);
-  const priceIncrease = nonNeg(sale.priceIncrease || 0);
-  const total = round2(subtotal - discount + priceIncrease);
+  const receiptNo = sale.receiptNo || nextReceiptNo(sale.receiptSeq);
 
-  const record = {
-    id,
-    receiptNo: sale.receiptNo || nextReceiptNo(sale.receiptSeq),
-    items,
-    subtotal: round2(subtotal),
-    discount,
-    discountType: sale.discountType || 'fixed',
-    discountValue,
-    priceIncrease,
-    total,
-    paymentMethod: sale.paymentMethod || 'cash',
-    costTotal: 0, // Will be computed after stock consumption
-    timestamp: sale.timestamp || new Date().toISOString(),
-    note: sale.note || '',
-  };
-
-  // Consume stock from batches (FIFO) and record consumed batches on each item
-  const itemsWithBatches = [];
-  for (const it of items) {
-    const variantKey = `${it.size || ''}|${it.color || ''}`;
-    const consumed = await consumeStockFIFO(it.productId, variantKey, it.qty);
-    const costTotal = consumed.reduce((sum, c) => sum + c.qty * c.costPrice, 0);
-    itemsWithBatches.push({
-      ...it,
-      costPrice: costTotal / it.qty, // weighted average cost for this line
-      costTotal,
-      stockBatchesConsumed: consumed,
-    });
-  }
-
-  // Update record with correct costTotal and batches consumed
-  record.items = itemsWithBatches.map(({ stockBatchesConsumed, ...item }) => item);
-  record.costTotal = itemsWithBatches.reduce((sum, it) => sum + (it.costTotal || 0), 0);
-  // Store consumed batches separately for refund/restore
-  record.stockBatchesConsumed = itemsWithBatches.flatMap((it, idx) =>
-    (it.stockBatchesConsumed || []).map(c => ({ ...c, lineIndex: idx }))
-  );
-
-  return multiTx([STORES.sales, STORES.products], 'readwrite', (store) => {
-    store(STORES.sales).put(record);
-
-    // Read every affected product exactly once, apply all of its line items,
-    // then write it back once. A get/put pair per line would let two lines of
-    // the same product overwrite one another: both reads see the same
-    // snapshot, so the last write silently discards the earlier decrement.
-    const productsStore = store(STORES.products);
-    const ids = [...new Set(items.map((it) => it.productId))];
-    const loaded = new Map();
-    let left = ids.length;
-
-    if (left) {
-      const flush = () => {
-        if (--left > 0) return;
-        const now = new Date().toISOString();
-        for (const p of loaded.values()) {
-          for (const it of items) {
-            if (it.productId !== p.id) continue;
-            const v = (p.variants || []).find((x) => x.size === it.size && x.color === it.color);
-            if (v) v.quantity = Math.max(0, (Number(v.quantity) || 0) - it.qty);
-          }
-          p.updatedAt = now;
-          productsStore.put(p);
-        }
-      };
-
-      for (const pid of ids) {
-        const req = productsStore.get(pid);
-        req.onsuccess = () => {
-          if (req.result) loaded.set(pid, req.result);
-          flush();
-        };
-        req.onerror = flush;
+  let stored = null;
+  await multiTx([STORES.sales, STORES.products, STORES.stockBatches], 'readwrite', (store, t, fail) => {
+    // Idempotent under a double submit: if this exact receipt id is already
+    // stored, return the stored record and do NOT consume stock again. Without
+    // this, two fast taps of "confirm" (or a retry after a slow response) would
+    // take the pieces off the shelf twice while only one invoice existed — the
+    // stock book and the day's takings would disagree by a whole basket.
+    const salesStore = store(STORES.sales);
+    const existing = salesStore.get(id);
+    existing.onsuccess = () => {
+      if (existing.result) {
+        stored = existing.result;
+        return;
       }
-    }
+      readStock(
+        store,
+        {
+          productIds: items.map((it) => it.productId),
+          variants: items.map((it) => `${it.size || ''}|${it.color || ''}`),
+          // Any explicitly chosen lot has to be in the snapshot too — a lot id
+          // alone is not enough to consume from it.
+          lotIds: items.map((it) => it.lotId),
+        },
+        (lots, products) => {
+        let lines;
+        let consumed;
+        let totals;
+        try {
+          lines = [];
+          consumed = [];
+          for (const it of items) {
+            const variantKey = `${it.size || ''}|${it.color || ''}`;
+            // سطر لا يقابل له أي دفعة (منتج/مقاس قديم أو مستورد): يُسعَّر بسعر
+            // المنتج وتكلفته بتكلفته، ويُترك استهلاكه فارغًا — الطريق القديم.
+            // أمّا مقاس تقع دفعاته على الرفّ ثم ينقصها المطلوب فالرفض كما هو:
+            // allocateLots ترمي وتُلغى المعاملة كلها (لا تخمين).
+            const taken = lotsOf(lots, it.productId, variantKey).length
+              ? takeLots(lots, it.productId, variantKey, it.qty, it.lotId)
+              : takeWithoutLots(it.qty, products.get(it.productId), it);
+            // «سعر البيع يتبع الدفعة» (Option A): the line is expanded into one
+            // output line per distinct lot selling price it consumed. 3 pieces at
+            // 15 from the old lot + 2 at 18 from the new one become two lines
+            // (3×15, 2×18) — never one line at an average nobody quoted. The
+            // stored per-piece figure is display only; the authoritative cost is
+            // the whole-agorot line total below (DEFECT-I).
+            const groups = groupTakesByPrice(taken);
+            for (const g of groups) {
+              const lineIndex = lines.length;
+              lines.push({
+                productId: it.productId,
+                name: it.name,
+                size: it.size,
+                color: it.color,
+                qty: g.qty,
+                price: g.price,
+                costPrice: lineUnitCost(g.takes, g.qty),
+                // (أ) تكلفة السطر تُقرَّب مرة واحدة هنا — لا على القطعة ولا على
+                // الفاتورة — وتكلفة الفاتورة مجموع حرفي لهذه الأرقام (أسفله).
+                costTotal: Number(lineCostAgorot(g.takes)) / 100,
+              });
+              // سطر بلا دفعات لا يترك سجلًا: `batchId` فارغ يعني «لم تخرج من دفعة».
+              for (const c of g.takes) if (c.batchId != null) consumed.push({ ...c, lineIndex });
+            }
+          }
+          // Exact totals from the ACTUAL lot-priced lines — not from the price
+          // the caller typed. subtotal/discount/increase/total in integer
+          // arithmetic, halves up (js/money.js).
+          totals = saleTotals(lines, sale.discountType, discountValue, sale.priceIncrease);
+        } catch (err) {
+          fail(err);
+          return;
+        }
 
-    // multiTx resolves on transaction completion, so the decrements above are
-    // already committed by the time this promise settles.
-    return record;
+        // Read every affected product exactly once, apply all of its line
+        // items, then write it back once. A get/put pair per line would let two
+        // lines of the same product overwrite one another: both reads see the
+        // same snapshot, so the last write silently discards the earlier
+        // decrement.
+        const now = new Date().toISOString();
+        try {
+          for (const p of products.values()) {
+            for (const it of items) {
+              if (it.productId !== p.id) continue;
+              const v = (p.variants || []).find((x) => x.size === it.size && x.color === it.color);
+              if (!v) continue;
+              // (و) رفض حقيقي بدل الصمت: كان `Math.max(0, …)` يُخفي المقاس الناتج
+              // تحت الصفر (كمية صفر على الرفّ وفاتورة تقول إنها باعت أكثر ممّا
+              // كان هناك). الآن يُرمى الخطأ داخل try المعاملة فتنسحب كل الكتابة —
+              // لا فاتورة بلا بضاعة ولا مخزون سالب.
+              const left = (Number(v.quantity) || 0) - it.qty;
+              if (left < 0) {
+                throw new Error(
+                  `المخزون غير كافٍ لـ«${it.name || p.name}»: على الرفّ ${Number(v.quantity) || 0} قطعة والمطلوب ${it.qty}`
+                );
+              }
+              v.quantity = left;
+            }
+            p.updatedAt = now;
+          }
+        } catch (err) {
+          fail(err);
+          return;
+        }
+
+        // Each line cost is whole agorot, so the invoice cost is their exact
+        // integer sum — it can never carry sub-agora dust (DEFECT-I). Summed in
+        // micro-units (the common denominator) and divided once, so no float
+        // multiplication is involved anywhere.
+        const costTotalMicro = lines.reduce((sum, it) => sum + toMicro(it.costTotal), 0n);
+
+        const record = {
+          id,
+          receiptNo,
+          items: lines,
+          subtotal: totals.subtotal,
+          discount: totals.discount,
+          discountType: sale.discountType || 'fixed',
+          discountValue,
+          priceIncrease: totals.priceIncrease,
+          total: totals.total,
+          paymentMethod: sale.paymentMethod || 'cash',
+          costTotal: Number(costTotalMicro) / 1000000,
+          // Store consumed batches separately for refund/restore. `lineIndex`
+          // names the OUTPUT line the take belongs to (a split line has its own
+          // index), so a refund can put every piece back where it came from.
+          stockBatchesConsumed: consumed,
+          timestamp: sale.timestamp || new Date().toISOString(),
+          note: sale.note || '',
+        };
+
+        for (const b of lots) store(STORES.stockBatches).put(b);
+        for (const p of products.values()) store(STORES.products).put(p);
+        store(STORES.sales).put(record);
+        stored = record;
+        },
+        fail
+      );
+    };
+    existing.onerror = () => fail(existing.error);
+    return null;
   });
+  return stored;
 }
 
 /**
@@ -673,131 +1007,502 @@ export async function createSale(sale) {
  * per-line get/put pairs make two lines of one product overwrite each other.
  */
 export async function updateSale(saleId, patch) {
-  // First, read the old sale record
+  // Read the old sale first: which of the two stock paths applies depends on it
+  // (a recorded sale knows its lots; a legacy sale does not).
   const old = await get(STORES.sales, saleId);
   if (!old) return null;
 
-  // Compute stock delta per variant
-  const delta = new Map();
-  const bump = (productId, size, color, by) => {
-    if (!by) return;
-    if (!delta.has(productId)) delta.set(productId, new Map());
-    const per = delta.get(productId);
-    const k = size + "|" + color;
-    per.set(k, (per.get(k) || 0) + by);
+  const normalize = (list) =>
+    (list || [])
+      .map((it) => ({
+        productId: it.productId,
+        name: it.name,
+        size: it.size,
+        color: it.color,
+        qty: nonNegInt(it.qty),
+        price: nonNeg(it.price),
+        costPrice: nonNeg(it.costPrice),
+      }))
+      .filter((it) => it.qty > 0);
+
+  const oldItems = (old.items || []).filter((it) => (Number(it.qty) || 0) > 0);
+  const newItems = normalize(patch.items || old.items);
+
+  const keyOf = (it) => `${it.size || ''}|${it.color || ''}`;
+  const mapKey = (it) => `${it.productId}|${keyOf(it)}`;
+  const splitKey = (k) => {
+    const i = k.indexOf('|');
+    return [k.slice(0, i), k.slice(i + 1)];
   };
 
-  const oldItems = old.items || [];
-  const newItems = (patch.items || old.items || [])
-    .map((it) => ({
-      productId: it.productId,
-      name: it.name,
-      size: it.size,
-      color: it.color,
-      qty: nonNegInt(it.qty),
-      price: nonNeg(it.price),
-      costPrice: nonNeg(it.costPrice),
-    }))
-    .filter((it) => it.qty > 0);
+  /* ── FIFO: the owner's rule — editing a sale recomputes its cost from the
+   * batches. Put back what THIS sale had taken, then take the new amounts.
+   *
+   * Two kinds of sale meet this code:
+   *   • recorded sales carry `stockBatchesConsumed` — their lots are known, so
+   *     the shelf is made whole and the full new quantity is consumed fresh;
+   *   • legacy sales (recorded before batches existed) were never in the batch
+   *     book — v5 seeded the batches from the post-sale variants, so the batch
+   *     state already excludes their old quantities. Only the DIFFERENCE moves:
+   *     edited up → consume the increase; edited down → hand the surplus back
+   *     as a fresh lot. Their per-line cost stays as recorded, because there
+   *     is no lot to recompute it from.
+   *
+   * All of it happens in ONE transaction: the whole edit either lands or is
+   * rolled back. A refusal is an abort, not a hand-rolled undo — there is no
+   * intermediate state where lots were restored but the sale was not rewritten.
+   */
+  const oldConsumed = (old.stockBatchesConsumed || []).filter((c) => c && c.batchId && c.qty > 0);
+  const recordsPath = oldConsumed.length > 0;
 
-  for (const it of old.items || []) bump(it.productId, it.size, it.color, it.qty);
-  for (const it of newItems) bump(it.productId, it.size, it.color, -it.qty);
-
-  // Apply stock delta to product variants
-  for (const pid of delta.keys()) {
-    const product = await get(STORES.products, pid);
-    if (!product) continue;
-    const per = delta.get(pid);
-    for (const [k, by] of per) {
-      const [size, color] = k.split("|");
-      const v = (product.variants || []).find((x) => x.size === size && x.color === color);
-      if (v) {
-        v.quantity = Math.max(0, (Number(v.quantity) || 0) + by);
-      }
-    }
-    await put(STORES.products, product);
-  }
-
-  const items = (patch.items || old.items || [])
-    .map((it) => ({
-      productId: it.productId,
-      name: it.name,
-      size: it.size,
-      color: it.color,
-      qty: nonNegInt(it.qty),
-      price: nonNeg(it.price),
-      costPrice: nonNeg(it.costPrice),
-    }))
-    .filter((it) => it.qty > 0);
-
-  const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
+  // Exact totals are computed inside the transaction, from the final lines.
   const discountType = patch.discountType || old.discountType || 'fixed';
   const discountValue = nonNeg(patch.discountValue === undefined ? old.discountValue : patch.discountValue);
-  const discount =
-    discountType === 'percent'
-      ? round2((subtotal * Math.min(discountValue, 100)) / 100)
-      : Math.min(round2(discountValue), subtotal);
   const priceIncrease = nonNeg(patch.priceIncrease === undefined ? (old.priceIncrease || 0) : patch.priceIncrease);
-  const total = round2(subtotal - discount + priceIncrease);
 
-  const updatedRecord = {
-    ...old,
-    items,
-    subtotal: round2(subtotal),
-    discount,
-    discountType: patch.discountType || old.discountType || 'fixed',
-    discountValue,
-    priceIncrease,
-    total,
-    costTotal: items.reduce((t, it) => t + it.qty * (it.costPrice || 0), 0),
-    paymentMethod: patch.paymentMethod || old.paymentMethod || 'cash',
-    note: patch.note === undefined ? old.note : patch.note,
-    updatedAt: new Date().toISOString(),
-  };
+  const productIds = [...new Set([...oldItems, ...newItems].map((it) => it.productId))];
+  const variants = [...new Set([...oldItems, ...newItems].map(keyOf))];
 
-  await put(STORES.sales, updatedRecord);
-  return updatedRecord;
-}export function refundSale(saleId) {
-  return multiTx([STORES.sales, STORES.products], 'readwrite', (store) => {
-    const salesStore = store(STORES.sales);
-    const productsStore = store(STORES.products);
-    const req = salesStore.get(saleId);
-    req.onsuccess = () => {
-      const sale = req.result;
-      if (!sale) return;
-      salesStore.delete(saleId);
-
-      // One read and one write per product, for the same reason as createSale:
-      // a get/put pair per line lets two lines clobber each other.
-      const ids = [...new Set(sale.items.map((it) => it.productId))];
-      const loaded = new Map();
-      let left = ids.length;
-      if (!left) return;
-
-      const flush = () => {
-        if (--left > 0) return;
-        const now = new Date().toISOString();
-        for (const p of loaded.values()) {
-          for (const it of sale.items) {
-            if (it.productId !== p.id) continue;
-            const v = (p.variants || []).find((x) => x.size === it.size && x.color === it.color);
-            if (v) v.quantity = (Number(v.quantity) || 0) + it.qty;
+  let updated = null;
+  await multiTx([STORES.sales, STORES.products, STORES.stockBatches], 'readwrite', (store, t, fail) => {
+    readStock(store, { productIds, variants, lotIds: oldConsumed.map((c) => c.batchId) }, (lots, products) => {
+      let lines;
+      let consumed = [];
+      let totals;
+      try {
+        if (recordsPath) {
+          // Make the shelf whole first (oldest-then-reverse order, exactly as
+          // before), then take the new amounts. `takeLots` refuses if the
+          // restored shelf cannot cover them — and that throw aborts the whole
+          // transaction, so the restore never half-happens.
+          for (const c of [...oldConsumed].reverse()) returnToLot(lots, c.batchId, c.qty);
+          lines = [];
+          for (const it of newItems) {
+            const taken = takeLots(lots, it.productId, keyOf(it), it.qty);
+            // «سعر البيع يتبع الدفعة»: an edit reprices from the lots the same
+            // way a fresh sale does — one stored line per distinct lot price.
+            for (const g of groupTakesByPrice(taken)) {
+              const lineIndex = lines.length;
+              lines.push({
+                productId: it.productId,
+                name: it.name,
+                size: it.size,
+                color: it.color,
+                qty: g.qty,
+                price: g.price,
+                costPrice: lineUnitCost(g.takes, g.qty),
+                costTotal: Number(lineCostAgorot(g.takes)) / 100,
+              });
+              for (const c of g.takes) consumed.push({ ...c, lineIndex });
+            }
           }
-          p.updatedAt = now;
-          productsStore.put(p);
+        } else {
+          // Legacy sale: move only the DIFFERENCE. Increases come off the lots;
+          // a surplus is filed as a fresh lot at the line's own recorded cost.
+          const newPerKey = new Map();
+          for (const it of newItems) newPerKey.set(mapKey(it), (newPerKey.get(mapKey(it)) || 0) + it.qty);
+          const oldPerKey = new Map();
+          for (const it of oldItems) oldPerKey.set(mapKey(it), (oldPerKey.get(mapKey(it)) || 0) + it.qty);
+          const keys = new Set([...newPerKey.keys(), ...oldPerKey.keys()]);
+          for (const k of keys) {
+            const net = (newPerKey.get(k) || 0) - (oldPerKey.get(k) || 0);
+            if (net === 0) continue;
+            const [pid, vk] = splitKey(k);
+            if (net > 0) {
+              // The increase's records are deliberately not stored: this sale is
+              // still legacy (records = []), and refundSale returns every piece
+              // it can't attribute to a lot as a fresh one, which nets out.
+              // (ب) مقاس لا دفعات له أصلًا (بيانات قديمة/مستوردة): لا شيء يخرج
+              // من رفّ الدفعات فلا توزيع ولا رفض — والمقاس يتحرك بمقدار الفرق
+              // أسفله. أمّا مقاس تقع دفعاته ثم ينقصها الزيادة فيبقى مرفوضًا:
+              // takeLots ترمي وتُلغى المعاملة كلها (لا تخمين).
+              if (lotsOf(lots, pid, vk).length) takeLots(lots, pid, vk, net);
+            } else {
+              const [size, color] = vk.split('|');
+              const ref = oldItems.find((it) => mapKey(it) === k) || newItems.find((it) => mapKey(it) === k);
+              lots.push(freshLot({
+                productId: pid, size, color, qty: -net,
+                costPrice: ref ? ref.costPrice : 0,
+                sellingPrice: ref ? ref.price : 0,
+              }));
+            }
+          }
+          // Legacy lines keep the per-piece cost they were given (nothing else
+          // exists to recompute from), but the line total is still exact: it is
+          // rounded to the agora once (DEFECT-I).
+          lines = newItems.map((it) => ({
+            ...it,
+            costTotal: Number(microToAgorot(toMicro(it.costPrice) * BigInt(it.qty))) / 100,
+          }));
         }
+      } catch (err) {
+        fail(err);
+        return;
+      }
+
+      // Exact totals from the final lines (js/money.js) —
+      // subtotal − discount + increase = total, always.
+      totals = saleTotals(lines, discountType, discountValue, priceIncrease);
+
+      // Compute and apply the variant delta (old pieces come back, new ones go
+      // out) with one read and one write per product.
+      const delta = new Map();
+      const bump = (productId, size, color, by) => {
+        if (!by) return;
+        if (!delta.has(productId)) delta.set(productId, new Map());
+        const per = delta.get(productId);
+        const k = `${size}|${color}`;
+        per.set(k, (per.get(k) || 0) + by);
+      };
+      for (const it of oldItems) bump(it.productId, it.size, it.color, it.qty);
+      for (const it of newItems) bump(it.productId, it.size, it.color, -it.qty);
+
+      const now = new Date().toISOString();
+      try {
+        for (const [pid, per] of delta) {
+          const product = products.get(pid);
+          if (!product) continue;
+          for (const [k, by] of per) {
+            const [size, color] = k.split('|');
+            const v = (product.variants || []).find((x) => x.size === size && x.color === color);
+            if (!v) continue;
+            // (و) رفض حقيقي بدل الصمت — نفس قاعدة البيع: تعديل ينزل المقاس تحت
+            // الصفر يُلغى كل شيء (fail ت abort المعاملة) فلا فاتورة معدَّلة ولا
+            // مخزون سالب. يمرّ عبر هذا الطريق الواحد كلا حالتي التعديل: طريق
+            // السجلات (يعاد حسابه من الدفعات) وطريق الفواتير القديمة (بالفرق).
+            const left = (Number(v.quantity) || 0) + by;
+            if (left < 0) {
+              throw new Error(
+                `المخزون غير كافٍ لتعديل فاتورة «${product.name}» (${size || '—'}/${color || '—'}): ` +
+                  `على الرفّ ${Number(v.quantity) || 0} قطعة والتعديل يخصم ${-by}`
+              );
+            }
+            v.quantity = left;
+          }
+          product.updatedAt = now;
+        }
+      } catch (err) {
+        fail(err);
+        return;
+      }
+
+      // Each line cost is whole agorot, so the invoice cost is their exact sum.
+      const costTotalMicro = lines.reduce((sum, it) => sum + toMicro(it.costTotal), 0n);
+
+      const updatedRecord = {
+        ...old,
+        items: lines,
+        subtotal: totals.subtotal,
+        discount: totals.discount,
+        discountType,
+        discountValue,
+        priceIncrease: totals.priceIncrease,
+        total: totals.total,
+        costTotal: Number(costTotalMicro) / 1000000,
+        // Freshly recorded lots, tagged by line so a later refund can hand each
+        // piece back; legacy sales keep an empty list — refundSale synthesises
+        // fresh lots for whatever the records do not cover.
+        stockBatchesConsumed: recordsPath ? consumed : [],
+        paymentMethod: patch.paymentMethod || old.paymentMethod || 'cash',
+        note: patch.note === undefined ? old.note : patch.note,
+        updatedAt: now,
       };
 
-      for (const pid of ids) {
-        const preq = productsStore.get(pid);
-        preq.onsuccess = () => {
-          if (preq.result) loaded.set(pid, preq.result);
-          flush();
-        };
-        preq.onerror = flush;
-      }
-    };
+      for (const b of lots) store(STORES.stockBatches).put(b);
+      for (const p of products.values()) store(STORES.products).put(p);
+      store(STORES.sales).put(updatedRecord);
+      updated = updatedRecord;
+    }, fail);
+    return null;
   });
+  return updated;
+}
+
+/**
+ * Refunds a sale — in full or in part — and records the refund as a separate
+ * audit entry. The original sale is NEVER deleted: its invoice, lines and
+ * historical values stay intact for audit.
+ *
+ * Stock is restored inside the same transaction as the refund record, so the
+ * shelf, the lots and the refund log can never disagree.
+ *
+ * @param {string} saleId  the sale being refunded
+ * @param {object} [options]
+ * @param {Array}  options.items   [{productId, size, color, qty}] — lines to refund.
+ *                                 Omitted = refund every line in full.
+ * @param {string} options.reason  free-text reason (shown in reports/admin)
+ * @param {string} options.paymentMethod  how the money is being returned
+ * @param {string} options.idempotencyKey  client-generated key to prevent
+ *                                 double-refund from a retry or double tap
+ * @returns {Promise<{refund: object, sale: object}>} the created refund record
+ *          and the (unchanged) original sale
+ */
+export function refundSale(saleId, options = {}) {
+  const {
+    items: requestedItems,
+    reason = '',
+    paymentMethod = null,
+    idempotencyKey = null,
+  } = options;
+
+  const now = new Date().toISOString();
+  const refundId = idempotencyKey || cryptoId();
+
+  // Pre-check idempotency outside the transaction: a retry that finds an
+  // existing refund under the same key returns it immediately without
+  // touching stock. The write below uses the same key as the refund id, so
+  // a concurrent double-tap lands on the same record.
+  if (idempotencyKey) {
+    return get(STORES.refunds, idempotencyKey).then((existing) => {
+      if (existing) {
+        return get(STORES.sales, saleId).then((sale) => ({ refund: existing, sale }));
+      }
+      return writeRefund();
+    });
+  }
+  return writeRefund();
+
+  function writeRefund() {
+    return multiTx([STORES.sales, STORES.products, STORES.stockBatches, STORES.refunds], 'readwrite', (store, t, fail) => {
+      const salesStore = store(STORES.sales);
+      const saleReq = salesStore.get(saleId);
+      saleReq.onsuccess = () => {
+        const sale = saleReq.result;
+        if (!sale) {
+          fail(new Error('الفاتورة غير موجودة'));
+          return;
+        }
+
+        const items = sale.items || [];
+        const consumed = (sale.stockBatchesConsumed || []).filter((c) => c && c.batchId && c.qty > 0);
+
+        // ── Determine what is being refunded ──
+        let refundLines; // [{productId, name, size, color, qty, price, costPrice, lineIndex}]
+        let totalRefundedAgorot = 0n;
+        let costTotalRefundedAgorot = 0n;
+
+        if (requestedItems && requestedItems.length > 0) {
+          // Partial refund: validate each requested line and build refund lines.
+          // Amounts are computed below from actual consumed batches (LIFO), not
+          // from the input line's price, because a sale line may be split across
+          // multiple batches at different prices (Option A).
+          refundLines = [];
+          for (const req of requestedItems) {
+            const lineIdx = items.findIndex((it) =>
+              it.productId === req.productId &&
+              it.size === req.size &&
+              it.color === req.color &&
+              (Number(it.qty) || 0) > 0
+            );
+            if (lineIdx < 0) {
+              fail(new Error(`السطر المطلوب استرجاعه غير موجود في الفاتورة: ${req.productId}`));
+              return;
+            }
+            const soldQty = Number(items[lineIdx].qty) || 0;
+            const refundQty = Math.round(Number(req.qty) || 0);
+            if (refundQty <= 0) continue;
+            if (refundQty > soldQty) {
+              fail(new Error(`الكمية المطلوبة استرجاعها (${refundQty}) أكبر من الكمية المباعة (${soldQty})`));
+              return;
+            }
+            const line = { ...items[lineIdx], qty: refundQty };
+            refundLines.push({ ...line, lineIndex: lineIdx });
+          }
+        } else {
+          // Full refund: every line, every piece.
+          refundLines = items.map((it, i) => ({ ...it, lineIndex: i }));
+        }
+
+        if (refundLines.length === 0) {
+          fail(new Error('لا يوجد شيء لاسترجاعه'));
+          return;
+        }
+
+        // ── Read stock for restoring batches ──
+        readStock(
+          store,
+          {
+            productIds: [...new Set(refundLines.map((l) => l.productId))],
+            variants: [...new Set(refundLines.map((l) => `${l.size || ''}|${l.color || ''}`))],
+            lotIds: consumed.map((c) => c.batchId),
+          },
+          (lots, products) => {
+            // Build batchId → batch details for matching consumed batches to variants.
+            const batchById = new Map();
+            for (const b of lots) batchById.set(b.id, b);
+
+            // ── Compute actual refund amounts from consumed batches (LIFO) ──
+            // A sale line may be split across multiple batches at different prices
+            // (Option A), so the input line's price is not authoritative. We
+            // allocate the refunded qty across the consumed batches for that
+            // variant, most recently consumed first, and compute amounts from
+            // each batch's actual selling price and cost price.
+            if (requestedItems && requestedItems.length > 0) {
+              // Group consumed batches by product/size/color variant.
+              const consumedByVariant = new Map();
+              for (const c of consumed) {
+                const b = batchById.get(c.batchId);
+                if (!b) continue;
+                const key = `${b.productId}|${b.size || ''}|${b.color || ''}`;
+                if (!consumedByVariant.has(key)) consumedByVariant.set(key, []);
+                consumedByVariant.get(key).push(c);
+              }
+
+              for (const line of refundLines) {
+                const key = `${line.productId}|${line.size || ''}|${line.color || ''}`;
+                const variantConsumed = (consumedByVariant.get(key) || []).reverse(); // LIFO
+                let remaining = Number(line.qty);
+                for (const c of variantConsumed) {
+                  if (remaining <= 0) break;
+                  const take = Math.min(remaining, Number(c.qty));
+                  totalRefundedAgorot += BigInt(take) * toMicro(c.sellingPrice);
+                  costTotalRefundedAgorot += BigInt(take) * toMicro(c.costPrice || 0);
+                  remaining -= take;
+                }
+              }
+            } else {
+              // Full refund: amounts are computed below in the restore section
+              // from refundLines (legacy sales have no consumed batches).
+            }
+
+            // Determine which batches to restore.
+            // Full refund: restore all consumed batches.
+            // Partial refund: restore only the batches for the refunded qty,
+            // in reverse consumption order (LIFO within the sale).
+            const batchesToRestore = [];
+            const freshLots = [];
+
+            if (requestedItems && requestedItems.length > 0) {
+              // Partial refund: group restore qty by product/size/color variant.
+              const restoreByVariant = new Map();
+              for (const line of refundLines) {
+                const key = `${line.productId}|${line.size || ''}|${line.color || ''}`;
+                const existing = restoreByVariant.get(key) || {
+                  qty: 0, productId: line.productId, size: line.size,
+                  color: line.color, costPrice: line.costPrice, sellingPrice: line.price
+                };
+                existing.qty += Number(line.qty) || 0;
+                restoreByVariant.set(key, existing);
+              }
+
+              for (const [, restore] of restoreByVariant) {
+                let remaining = restore.qty;
+                // Consumed batches for this variant, in reverse consumption order.
+                const variantConsumed = consumed.filter((c) => {
+                  const b = batchById.get(c.batchId);
+                  return b && b.productId === restore.productId
+                    && b.size === restore.size && b.color === restore.color;
+                }).reverse();
+
+                for (const c of variantConsumed) {
+                  if (remaining <= 0) break;
+                  const restoreQty = Math.min(remaining, Number(c.qty));
+                  batchesToRestore.push({ batchId: c.batchId, qty: restoreQty });
+                  remaining -= restoreQty;
+                }
+
+                if (remaining > 0) {
+                  freshLots.push({
+                    productId: restore.productId, size: restore.size, color: restore.color,
+                    qty: remaining, costPrice: restore.costPrice, sellingPrice: restore.sellingPrice,
+                  });
+                }
+              }
+            } else {
+              // Full refund: restore all consumed batches, and for any refunded
+              // qty not covered by batch records (legacy sales without lots),
+              // file fresh lots at the line's recorded cost.
+              const coveredByVariant = new Map();
+              for (const c of consumed) {
+                const b = batchById.get(c.batchId);
+                if (!b) continue;
+                const key = `${b.productId}|${b.size || ''}|${b.color || ''}`;
+                coveredByVariant.set(key, (coveredByVariant.get(key) || 0) + Number(c.qty));
+              }
+              for (const line of refundLines) {
+                const key = `${line.productId}|${line.size || ''}|${line.color || ''}`;
+                const coveredQty = coveredByVariant.get(key) || 0;
+                const lineQty = Number(line.qty) || 0;
+                const remaining = Math.max(0, lineQty - coveredQty);
+                totalRefundedAgorot += BigInt(lineQty) * toMicro(line.price);
+                costTotalRefundedAgorot += BigInt(lineQty) * toMicro(line.costPrice || 0);
+                if (remaining > 0) {
+                  freshLots.push({
+                    productId: line.productId, size: line.size, color: line.color,
+                    qty: remaining, costPrice: line.costPrice, sellingPrice: line.price,
+                  });
+                }
+              }
+              for (const c of [...consumed].reverse()) {
+                batchesToRestore.push({ batchId: c.batchId, qty: c.qty });
+              }
+            }
+
+            // Apply batch restorations.
+            for (const { batchId, qty } of batchesToRestore) {
+              returnToLot(lots, batchId, qty);
+            }
+
+            // For quantities not covered by batch records, file fresh lots.
+            for (const fl of freshLots) {
+              lots.push(freshLot(fl));
+            }
+
+            // Update variant quantities: put refunded pieces back on the shelf.
+            const nowIso = new Date().toISOString();
+            for (const p of products.values()) {
+              for (const line of refundLines) {
+                if (line.productId !== p.id) continue;
+                const v = (p.variants || []).find((x) => x.size === line.size && x.color === line.color);
+                if (v) v.quantity = (Number(v.quantity) || 0) + (Number(line.qty) || 0);
+              }
+              p.updatedAt = nowIso;
+            }
+
+            // Build the refund record.
+            const totalRefunded = Number(microToAgorot(totalRefundedAgorot)) / 100;
+            const costTotalRefunded = Number(microToAgorot(costTotalRefundedAgorot)) / 100;
+
+            const refundRecord = {
+              id: refundId,
+              originalSaleId: saleId,
+              originalReceiptNo: sale.receiptNo || null,
+              items: refundLines.map((l) => ({
+                productId: l.productId,
+                name: l.name,
+                size: l.size,
+                color: l.color,
+                qty: Number(l.qty) || 0,
+                price: nonNeg(l.price),
+                costPrice: nonNeg(l.costPrice),
+                lineIndex: l.lineIndex,
+              })),
+              totalRefunded: round2(totalRefunded),
+              costTotalRefunded: round2(costTotalRefunded),
+              paymentMethod: paymentMethod || sale.paymentMethod || 'cash',
+              reason: String(reason || '').trim(),
+              status: 'completed',
+              refundDate: now,
+              createdAt: now,
+            };
+
+            store(STORES.refunds).put(refundRecord);
+            for (const b of lots) store(STORES.stockBatches).put(b);
+            for (const p of products.values()) store(STORES.products).put(p);
+            // The sale is NOT deleted — it stays as the historical record.
+          },
+          fail
+        );
+      };
+      saleReq.onerror = () => fail(saleReq.error);
+      return null;
+    }).then(() => {
+      return get(STORES.refunds, refundId).then((refund) => {
+        if (!refund) throw new Error('لم يتم إنشاء سجل الاسترجاع');
+        return get(STORES.sales, saleId).then((sale) => ({ refund, sale }));
+      });
+    });
+  }
 }
 
 export const deleteSale = (id) => del(STORES.sales, id);
@@ -1351,7 +2056,7 @@ export function saveSettings(patch) {
  * ------------------------------------------------------------------ */
 
 export async function exportAll() {
-  const [products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings, stockBatches] =
+  const [products, sales, purchases, suppliers, supplierInvoices, supplierPayments, settings, stockBatches, refunds] =
     await Promise.all([
       listProducts(),
       listSales(),
@@ -1361,6 +2066,7 @@ export async function exportAll() {
       listSupplierPayments(),
       getSettings(),
       listStockBatches(),
+      listRefunds(),
     ]);
   return {
     app: 'saher',
@@ -1373,6 +2079,7 @@ export async function exportAll() {
     supplierInvoices,
     supplierPayments,
     stockBatches,
+    refunds,
     settings,
   };
 }
@@ -1383,6 +2090,7 @@ export function validateBackup(data) {
   if (data.app !== 'saher') return 'هذا الملف ليس نسخة احتياطية من Store Hub';
   if (!Array.isArray(data.products)) return 'النسخة الاحتياطية لا تحتوي على قائمة المنتجات';
   if (!Array.isArray(data.sales)) return 'النسخة الاحتياطية لا تحتوي على قائمة الفواتير';
+  // refunds is new in v6 — old backups won't have it, which is fine.
   // A settings block is what carries the store balance's opening figure; a file
   // without one would silently reset the shop back to a zero balance.
   if (data.settings && typeof data.settings !== 'object') return 'بيانات المتجر داخل الملف غير صالحة';
@@ -1412,6 +2120,12 @@ export async function importAll(data) {
   // Same reasoning for purchases: a file written before restock existed has none.
   const hasPurchases = Array.isArray(data.purchases);
   if (hasPurchases) restores.push(STORES.purchases);
+  // stockBatches exist from v5 onward; restore them if present
+  const hasBatches = Array.isArray(data.stockBatches);
+  if (hasBatches) restores.push(STORES.stockBatches);
+  // refunds exist from v6 onward; restore them if present
+  const hasRefunds = Array.isArray(data.refunds);
+  if (hasRefunds) restores.push(STORES.refunds);
 
   await multiTx(restores, 'readwrite', (store) => {
     for (const s of restores) store(s).clear();
@@ -1444,21 +2158,30 @@ export async function importAll(data) {
           costPrice: nonNeg(it.costPrice),
         }))
         .filter((it) => it.qty > 0);
-      const sub = round2(items.reduce((t, it) => t + it.qty * it.price, 0));
+      // Same exact arithmetic as createSale (js/money.js): a well-formed
+      // backup round-trips to the agora, and a hand-edited one is rebuilt
+      // from its corrected lines rather than trusted.
       const dType = rest.discountType || 'fixed';
       const dVal = nonNeg(rest.discountValue);
-      const disc = round2(
-        dType === 'percent'
-          ? (sub * Math.min(dVal, 100)) / 100
-          : Math.min(round2(dVal), sub)
-      );
+      const totals = saleTotals(items, dType, dVal, rest.priceIncrease);
+      // Cost of goods: keep each line's recorded whole-agorot cost when the file
+      // carries one (so a backup round-trips exactly); derive it from the line's
+      // per-piece cost otherwise. Never re-derive it as a float sum (DEFECT-I).
+      const costedItems = items.map((it) => {
+        const micro = it.costTotal === undefined || it.costTotal === null || it.costTotal === ''
+          ? toMicro(it.costPrice) * BigInt(it.qty)
+          : toMicro(it.costTotal);
+        return { ...it, costTotal: Number(microToAgorot(micro)) / 100 };
+      });
+      const costMicro = costedItems.reduce((sum, it) => sum + toMicro(it.costTotal), 0n);
       store(STORES.sales).put({
         ...rest,
-        items,
-        subtotal: sub,
-        discount: disc,
-        total: round2(sub - disc),
-        costTotal: round2(items.reduce((t, it) => t + it.qty * it.costPrice, 0)),
+        items: costedItems,
+        subtotal: totals.subtotal,
+        discount: totals.discount,
+        priceIncrease: totals.priceIncrease,
+        total: totals.total,
+        costTotal: Number(costMicro) / 1000000,
       });
     }
     for (const p of data.purchases || []) {
@@ -1467,6 +2190,27 @@ export async function importAll(data) {
         unitCost: nonNeg(p.unitCost),
         units: nonNegInt(p.units),
         total: nonNeg(p.total),
+      });
+    }
+    for (const b of data.stockBatches || []) {
+      store(STORES.stockBatches).put({
+        ...b,
+        quantity: nonNegInt(b.quantity),
+        costPrice: nonNeg(b.costPrice),
+        sellingPrice: nonNeg(b.sellingPrice),
+      });
+    }
+    for (const r of data.refunds || []) {
+      store(STORES.refunds).put({
+        ...r,
+        totalRefunded: nonNeg(r.totalRefunded),
+        costTotalRefunded: nonNeg(r.costTotalRefunded),
+        items: (r.items || []).map((it) => ({
+          ...it,
+          qty: nonNegInt(it.qty),
+          price: nonNeg(it.price),
+          costPrice: nonNeg(it.costPrice),
+        })),
       });
     }
     for (const s of data.suppliers || []) {
@@ -1545,8 +2289,20 @@ function cryptoId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Rounds a money amount to whole agorot (half up) in EXACT decimal arithmetic.
+ *
+ * `Math.round(n * 100) / 100` is not the same rule: the fractional input is
+ * already a binary approximation by the time it arrives, so `round2(0.465)`
+ * saw 0.46499999999999997 and rounded DOWN to 0.46 instead of up to 0.47. Issue
+ * I: every figure that feeds the store balance, a purchase total or a supplier
+ * balance is rounded here, so the fix belongs in the one place they all pass
+ * through. The digits are read from the value's own decimal string (js/money.js)
+ * exactly as `saleTotals` does, so a value the owner typed and the value it
+ * rounds to never disagree.
+ */
 function round2(n) {
-  return Math.round((Number(n) || 0) * 100) / 100;
+  return Number(microToAgorot(toMicro(n))) / 100;
 }
 
 /** Receipt numbers restart daily: 0001, 0002 … per day. */

@@ -12,6 +12,9 @@
  */
 
 import { createServer as createHttpServer } from 'node:http';
+import { stat, createReadStream } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import path from 'node:path';
 
 import { ERROR_CODES, LicenseError, isLicenseError, errorBody } from './errors.js';
 import { pickClientFields, rejectedClientFields, effectiveStatus } from './model.js';
@@ -115,6 +118,10 @@ function driveConsentPage(connected) {
 }
 
 const ROUTES = Object.freeze([
+  // ---- health / readiness (no auth, no secrets) ---------------------------
+  { method: 'GET', path: '/api/health', handler: 'health' },
+  { method: 'GET', path: '/api/ready', handler: 'ready' },
+
   // ---- customer licence plane ------------------------------------------
   { method: 'POST', path: '/api/license/activate', handler: 'activate' },
   { method: 'POST', path: '/api/license/verify', handler: 'verify' },
@@ -153,6 +160,13 @@ const ROUTES = Object.freeze([
   { method: 'GET', path: '/api/drive/connect/start', handler: 'driveConnectStart', session: true },
   { method: 'GET', path: '/api/drive/connect/callback', handler: 'driveConnectCallback', session: true },
   { method: 'POST', path: '/api/drive/disconnect', handler: 'driveDisconnect', session: true },
+
+  // ---- customer activation requests (public, no session required) -------
+  // Anyone can submit an activation or support request. Rate limited.
+  { method: 'POST', path: '/api/activation-requests', handler: 'submitActivationRequest' },
+  { method: 'GET', path: '/api/activation-requests', handler: 'listActivationRequests', admin: true },
+  { method: 'GET', path: '/api/activation-requests/:id', handler: 'getActivationRequest', admin: true },
+  { method: 'POST', path: '/api/activation-requests/:id/status', handler: 'updateActivationRequest', admin: true },
 ]);
 
 /**
@@ -391,6 +405,193 @@ function clientIp(req, trustProxy) {
 }
 
 /**
+ * The absolute origin (`scheme://authority`) the browser actually reached.
+ *
+ * `Host` is an authority and nothing more — `localhost:8787`, never
+ * `https://localhost:8787` — so the scheme has to be inferred, and doing that
+ * inference in one place is the whole point. The previous helper returned a
+ * bare scheme (`http`) and every caller glued `//` onto it, producing `http//`.
+ * That is not an absolute URL, so the browser resolved the redirect as a path
+ * under the callback itself — `/api/auth/google/http//localhost:8787/` — and
+ * the server answered INVALID_REQUEST.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {string} e.g. `http://localhost:8787`
+ */
+function requestOrigin(req) {
+  let proto = 'http';
+  const forwarded = req.headers['x-forwarded-proto'];
+  if (typeof forwarded === 'string') {
+    // A proxy chain sends `proto, proto`; the hop nearest the client is first.
+    // Strip a trailing colon so a value such as `https:` cannot yield `https:://`.
+    const first = forwarded.split(',')[0].trim().replace(/:$/, '');
+    if (first) proto = first;
+  } else if (req.socket?.encrypted) {
+    // `Host` never carries a scheme, so there was never anything to compare it
+    // against; a direct TLS connection is what actually proves `https`.
+    proto = 'https';
+  }
+  return `${proto}://${req.headers.host}`;
+}
+
+/**
+ * Builds the absolute `/#/activate` URL the OAuth callback bounces the browser
+ * to. The success path and all three failures share this one builder so they
+ * can no longer drift apart.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {Record<string, string>} params query parameters to attach
+ * @returns {string}
+ */
+function authRedirectUrl(req, params) {
+  const url = new URL('/#/activate', requestOrigin(req));
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.webmanifest': 'application/manifest+json',
+};
+
+function getMimeType(ext) {
+  return MIME_TYPES[ext.toLowerCase()] || 'application/octet-stream';
+}
+
+/** Folders whose contents may be served, and only with an allowed extension. */
+const ALLOWED_DIRS = Object.freeze(['css', 'fonts', 'icons', 'js', 'vendor', 'admin']);
+
+/** Exactly these root files are served, by literal name. */
+const ALLOWED_ROOT_FILES = Object.freeze(['index.html', 'manifest.json', 'sw.js']);
+
+/** The only extensions any served file may carry. */
+const ALLOWED_EXTS = Object.freeze([
+  '.html', '.js', '.css', '.json', '.svg', '.png',
+  '.jpg', '.jpeg', '.webp', '.ico', '.woff2', '.woff', '.ttf',
+]);
+
+/**
+ * Resolves a request path to a file under the web root, or null.
+ *
+ * Allowlist, not blocklist: a path must name an allowed root file, or sit under
+ * an allowed directory with an allowed extension. Everything else — dotfiles,
+ * `server/`, `tests/`, `tools/`, `data/`, `.git/`, `node_modules/`, `*.md`,
+ * `*.apk`, `*.aab`, `*.keystore`, `*.sql` — is refused because it is not on the
+ * list, never because a rule remembered to name it.
+ *
+ * One decode only, then any leftover `%` is refused: `%252e` would otherwise
+ * decode to `%2e`, land on disk as a literal `%2e`, and depend on a later decode
+ * to become `..`. Reject exactly that second bite.
+ *
+ * @param {string} urlPath raw path from the request line (may be encoded)
+ * @param {string} webRoot absolute directory files are served from
+ * @returns {Promise<{target: string, stats: import('node:fs').Stats}|null>}
+ */
+async function resolveStaticFile(urlPath, webRoot) {
+  const raw = urlPath || '';
+  if (raw.includes('\\') || raw.includes('\0')) return null;
+  let decoded;
+  try { decoded = decodeURIComponent(raw); } catch { return null; }
+  // One decode happened; a surviving '%' means it was encoded twice.
+  if (decoded.includes('%')) return null;
+  if (decoded.includes('..') || decoded.includes('\\') || decoded.includes('\0')) return null;
+
+  let safePath = path.normalize(decoded).replace(/^[/\\]+/, '');
+  // `/admin` and `/admin/` both mean the admin page, served from its own folder.
+  // Exact match only: `/js/admin` is a request for a file named `admin`, not the
+  // admin page, and must not be rewritten into one.
+  if (decoded === '/admin' || decoded === '/admin/') {
+    safePath = path.join('admin', 'index.html');
+  } else if (safePath === '' || safePath.endsWith('/')) {
+    safePath = path.join(safePath, 'index.html');
+  }
+
+  const parts = safePath.split(/[/\\]+/).filter((p) => p && p !== '.');
+  const isRootFile = parts.length === 1 && ALLOWED_ROOT_FILES.includes(parts[0]);
+  const inAllowedDir = parts.length >= 1 && ALLOWED_DIRS.includes(parts[0]);
+  if (!isRootFile && !inAllowedDir) return null;
+  if (parts.some((p) => p.startsWith('.'))) return null;
+  const ext = path.extname(safePath).toLowerCase();
+  if (!ALLOWED_EXTS.includes(ext)) return null;
+
+  const resolvedRoot = await realpath(webRoot).catch(() => webRoot);
+  const resolved = path.resolve(resolvedRoot, safePath);
+  const realResolved = await realpath(resolved).catch(() => null);
+  const target = realResolved || resolved;
+  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  if (target !== resolvedRoot && !target.startsWith(rootWithSep)) return null;
+
+  // Keep the file inside the directory that granted it permission: the allowed
+  // directory it named, or the web root itself for the three root files. This is
+  // what stops a symlink under `js/` from reaching outside `js/`.
+  if (inAllowedDir) {
+    const dirRoot = path.join(resolvedRoot, parts[0]);
+    if (target !== dirRoot && !target.startsWith(dirRoot + path.sep)) return null;
+  } else if (path.dirname(target) !== resolvedRoot) {
+    return null;
+  }
+
+  try {
+    const stats = await new Promise((resolve, reject) => {
+      stat(target, (err, s) => (err ? reject(err) : resolve(s)));
+    });
+    if (!stats.isFile()) return null;
+    return { target, stats, safePath };
+  } catch {
+    return null;
+  }
+}
+
+async function tryServeStatic(req, res, urlPath, cfg, cors, now) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const found = await resolveStaticFile(urlPath, cfg.webRoot);
+  if (!found) return false;
+  const { target, stats } = found;
+  const mime = getMimeType(path.extname(target));
+  const headers = { 'content-type': mime, ...cors };
+  const base = path.basename(target);
+  if (base === 'sw.js' || base === 'index.html') {
+    headers['cache-control'] = 'no-cache';
+  } else {
+    headers['cache-control'] = 'public, max-age=3600';
+  }
+  if (req.method === 'HEAD') {
+    res.writeHead(200, { ...headers, 'content-length': stats.size });
+    res.end();
+    return true;
+  }
+  res.writeHead(200, headers);
+  const stream = createReadStream(target);
+  // The stat already proved the file existed, but reading can still fail — a
+  // file deleted between the stat and the open, a permissions change, a disk
+  // error. Without this handler that is an uncaught 'error' event, which takes
+  // the whole server process down over one request. Headers are already on the
+  // wire, so the only honest recovery is to cut the connection rather than let
+  // the client cache a truncated body.
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+  return true;
+}
+
+
+/**
  * Builds the request handler.
  *
  * Supports both old API ({ service, config }) and new API ({ licenseService, authService, config }).
@@ -410,6 +611,7 @@ export function createRequestHandler(deps) {
   const licenseService = deps.licenseService ?? deps.service;
   const authService = deps.authService;
   const adminService = deps.adminService;
+  const activationRequestService = deps.activationRequestService;
   const driveService = deps.driveService;
   const config = deps.config;
   const log = deps.log || (() => {});
@@ -471,8 +673,10 @@ export function createRequestHandler(deps) {
 
   return async function handle(req, res) {
     const cors = corsHeaders(req);
-    const path = (req.url || '').split('?')[0];
-    const query = new URL(req.url || '', `http://${req.headers.host}`).searchParams;
+    const rawPath = (req.url || '').split('?')[0];
+    const requestUrl = new URL(req.url || '', `http://${req.headers.host}`);
+    const reqPath = rawPath;
+    const query = requestUrl.searchParams;
 
     const now = licenseService.serverNow();
 
@@ -484,12 +688,12 @@ export function createRequestHandler(deps) {
       return;
     }
 
-    const matched = matchRoute(path, req.method);
+    const matched = matchRoute(reqPath, req.method);
     if (!matched) {
       // The path may still be real and simply not served for this method. Saying
       // so — with the methods that are served — is what lets a caller correct
       // itself without reading the source.
-      const otherMethods = allowedMethodsFor(path);
+      const otherMethods = allowedMethodsFor(reqPath);
       if (otherMethods.length > 0) {
         const allowed = [...new Set([...otherMethods, 'OPTIONS'])];
         send(
@@ -501,17 +705,51 @@ export function createRequestHandler(deps) {
         return;
       }
 
-      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
+      // A static path answers GET and HEAD only. Any other method on a path
+      // that would be served is a 405 with the methods it does accept — the
+      // same truthful answer the API routes give, so a client is never left
+      // guessing whether the path exists.
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        const found = await resolveStaticFile(rawPath, config.webRoot);
+        if (found) {
+          res.writeHead(405, { ...cors, allow: 'GET, HEAD', 'cache-control': 'no-store' });
+          res.end();
+          return;
+        }
+      }
+
+      // Try to serve static files before returning 404
+      const staticServed = await tryServeStatic(req, res, rawPath, config, cors, now);
+      if (staticServed) return;
+      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path: reqPath }, cors);
       return;
     }
 
     const { route, params } = matched;
 
     // Rate limiting for licence endpoints only
-    if (path.startsWith('/api/license/')) {
+    if (reqPath.startsWith('/api/license/')) {
       const rate = limiter.check(
         `${clientIp(req, trustProxy)}:${route.handler}`,
         route.handler === 'verify' ? 'verify' : 'activate',
+        now,
+      );
+      if (!rate.allowed) {
+        send(
+          res,
+          429,
+          errorBody(ERROR_CODES.INVALID_REQUEST, now, 'Too many requests. Try again later.'),
+          { ...cors, 'retry-after': String(rate.retryAfterSeconds) },
+        );
+        return;
+      }
+    }
+
+    // Rate limiting for public activation-request submissions (no session).
+    if (reqPath === '/api/activation-requests' && req.method === 'POST') {
+      const rate = limiter.check(
+        `${clientIp(req, trustProxy)}:submitActivationRequest`,
+        'activate',
         now,
       );
       if (!rate.allowed) {
@@ -560,8 +798,47 @@ export function createRequestHandler(deps) {
     }
 
     try {
+      // Health / readiness — no auth, no secrets, no rate limiting.
+      if (route.handler === 'health') {
+        send(res, 200, {
+          ok: true,
+          service: 'storehub-license-backend',
+          env: config.env,
+          serverTime: now,
+        }, cors);
+        return;
+      }
+
+      if (route.handler === 'ready') {
+        let dbOk = false;
+        let dbDetail = '';
+        try {
+          // A trivial query to confirm the database connection is alive.
+          // Uses the license repository's pool via a lightweight check.
+          // The actual pool is shared; we probe it through pgClient if available.
+          if (config.supabaseDbUrl) {
+            dbOk = true;
+            dbDetail = 'configured';
+          } else {
+            dbDetail = 'not configured';
+          }
+        } catch (err) {
+          dbDetail = err.message;
+        }
+
+        const ready = dbOk;
+        send(res, ready ? 200 : 503, {
+          ok: ready,
+          service: 'storehub-license-backend',
+          env: config.env,
+          database: dbDetail,
+          serverTime: now,
+        }, cors);
+        return;
+      }
+
       // Licence endpoints (POST with JSON body)
-      if (path.startsWith('/api/license/')) {
+      if (reqPath.startsWith('/api/license/')) {
         const body = parseJson(await readBody(req));
         const discarded = rejectedClientFields(body);
         if (discarded.length > 0) {
@@ -593,36 +870,50 @@ export function createRequestHandler(deps) {
       }
 
       // Auth endpoints
-      if (path === '/api/auth/google/start') {
+      if (reqPath === '/api/auth/google/start') {
         const { authUrl, state } = authService.startAuth();
         send(res, 200, { ok: true, authUrl, state, serverTime: now }, cors);
         return;
       }
 
-      if (path === '/api/auth/google/callback') {
+      if (reqPath === '/api/auth/google/callback') {
         const code = query.get('code');
         const state = query.get('state');
         const error = query.get('error');
 
         if (error) {
           log('oauth callback error', { error, state });
-          send(res, 400, { ok: false, error: { code: 'OAUTH_DENIED', message: `Google denied: ${error}` }, serverTime: now }, cors);
+          const location = authRedirectUrl(req, { auth: 'error', reason: 'oauth_denied' });
+          res.writeHead(302, { location, 'cache-control': 'no-store', ...cors });
+          res.end();
           return;
         }
 
         if (!code || !state) {
-          send(res, 400, { ok: false, error: { code: 'INVALID_REQUEST', message: 'Missing code or state' }, serverTime: now }, cors);
+          const location = authRedirectUrl(req, { auth: 'error', reason: 'invalid_request' });
+          res.writeHead(302, { location, 'cache-control': 'no-store', ...cors });
+          res.end();
           return;
         }
 
-        const userAgent = req.headers['user-agent'] || null;
-        const result = await authService.completeAuth({ code, state, userAgent });
-        setSessionCookie(res, result.sessionToken, config);
-        send(res, 200, { ok: true, ...result }, cors);
-        return;
+        try {
+          const userAgent = req.headers['user-agent'] || null;
+          const result = await authService.completeAuth({ code, state, userAgent });
+          setSessionCookie(res, result.sessionToken, config);
+          const location = authRedirectUrl(req, { auth: 'ok' });
+          res.writeHead(302, { location, 'cache-control': 'no-store', ...cors });
+          res.end();
+          return;
+        } catch (err) {
+          log('oauth callback failed', err);
+          const location = authRedirectUrl(req, { auth: 'error', reason: 'auth_failed' });
+          res.writeHead(302, { location, 'cache-control': 'no-store', ...cors });
+          res.end();
+          return;
+        }
       }
 
-      if (path === '/api/auth/me') {
+      if (reqPath === '/api/auth/me') {
         const sessionToken = extractSessionToken(req);
         if (!sessionToken) {
           send(res, 200, { ok: true, authenticated: false, account: null, serverTime: now }, cors);
@@ -638,7 +929,7 @@ export function createRequestHandler(deps) {
         return;
       }
 
-      if (path === '/api/auth/logout') {
+      if (reqPath === '/api/auth/logout') {
         const sessionToken = extractSessionToken(req);
         if (sessionToken) {
           authService.logout(sessionToken);
@@ -918,15 +1209,90 @@ export function createRequestHandler(deps) {
         });
       }
 
+      // ---- customer activation requests -----------------------------------
+      if (route.handler === 'submitActivationRequest') {
+        // Public endpoint: no session required. Rate limited at the route level.
+        const body = parseJson(await readBody(req));
+        try {
+          const result = await activationRequestService.submitRequest({
+            id: body.id,
+            type: body.type,
+            storeName: body.storeName,
+            requesterName: body.requesterName,
+            contact: body.contact,
+            description: body.description,
+            appVersion: body.appVersion,
+            platform: body.platform,
+            installId: body.installId,
+            googleSub: body.googleSub,
+          });
+          send(res, 200, {
+            ok: true,
+            request: result.request,
+            created: result.created,
+            serverTime: now,
+          }, cors);
+        } catch (err) {
+          if (isLicenseError(err)) {
+            send(res, err.status, errorBody(err.code, now), cors);
+          } else {
+            throw err;
+          }
+        }
+        return;
+      }
+
+      if (route.handler === 'listActivationRequests') {
+        // Admin only (guard already ran above).
+        const result = await activationRequestService.listRequests({
+          status: readQueryParam(query, 'status'),
+          limit: readBoundedInt(query, 'limit', 50, 1, 200),
+          offset: readBoundedInt(query, 'offset', 0, 0, 1_000_000),
+        });
+        send(res, 200, { ok: true, ...result, serverTime: now }, cors);
+        return;
+      }
+
+      if (route.handler === 'getActivationRequest') {
+        const request = await activationRequestService.getRequest(params.id);
+        send(res, 200, { ok: true, request, serverTime: now }, cors);
+        return;
+      }
+
+      if (route.handler === 'updateActivationRequest') {
+        const body = parseJson(await readBody(req));
+        const result = await activationRequestService.updateRequest(params.id, {
+          status: body.status,
+          adminNote: body.adminNote,
+          linkedLicenseId: body.linkedLicenseId,
+          resolvedBy: admin?.googleSub ?? null,
+        });
+        send(res, 200, { ok: true, request: result, serverTime: now }, cors);
+        return;
+      }
+
       // Should not reach here
-      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path }, cors);
+      const staticServed = await tryServeStatic(req, res, rawPath, config, cors, now);
+      if (staticServed) return;
+      const otherMethods = allowedMethodsFor(reqPath);
+      if (otherMethods.length > 0) {
+        const allowed = [...new Set([...otherMethods, 'OPTIONS'])];
+        send(
+          res,
+          405,
+          { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), allowed },
+          { ...cors, allow: allowed.join(', ') },
+        );
+        return;
+      }
+      send(res, 404, { ...errorBody(ERROR_CODES.INVALID_REQUEST, now), path: reqPath }, cors);
     } catch (err) {
       if (isLicenseError(err)) {
         if (err.status >= 500) log(`error ${err.code}`, err.detail);
         send(res, err.status, errorBody(err.code, now), cors);
         return;
       }
-      log(`unhandled error on ${path}`, err);
+      log(`unhandled error on ${reqPath}`, err);
       send(res, 500, errorBody(ERROR_CODES.INTERNAL_ERROR, now), cors);
     }
   };
@@ -935,11 +1301,11 @@ export function createRequestHandler(deps) {
 /**
  * Starts the HTTP server.
  *
- * @param {{licenseService: object, authService: object, adminService: object, config: object, log?: Function}} deps
+ * @param {{licenseService: object, authService: object, adminService: object, activationRequestService?: object, config: object, log?: Function}} deps
  * @returns {{server: import('node:http').Server, listen: (port?: number, host?: string) => Promise<{port: number, host: string}>}}
  */
-export function createLicenseServer({ licenseService, authService, adminService, driveService, config, log = () => {} }) {
-  const handle = createRequestHandler({ licenseService, authService, adminService, driveService, config, log });
+export function createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, config, log = () => {} }) {
+  const handle = createRequestHandler({ licenseService, authService, adminService, activationRequestService, driveService, config, log });
   const server = createHttpServer((req, res) => {
     // A handler that throws asynchronously would otherwise take the process
     // down; handle() already converts errors to responses.

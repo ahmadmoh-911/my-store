@@ -1,17 +1,24 @@
 /**
  * Product view — read-only product details.
  *
- * This screen shows all product information in a clean, read-only format.
- * No editing is possible from this screen; an explicit "Edit" button
- * navigates to the product form.
+ * Tapping a product in Inventory opens WHAT THE PIECE IS: image, name,
+ * category, prices, stock status and the size/colour/quantity table. There is
+ * deliberately nothing to type into here and no save button — every change
+ * belongs to the product form, which the explicit "تعديل" button opens.
+ *
+ * The styling reuses the app's existing building blocks (form-section, matrix,
+ * badge, thumb) — this screen's old `view__*` classes had no CSS anywhere, so
+ * the sections rendered as an unstyled jumble.
+ *
+ * Route: `#/product/<id>/view` (see router.js order 2.5).
  */
 import { icon } from '../icons.js';
 import {
-  el, fromHTML, clear, moneyHTML, numInt, escapeHTML,
+  el, fromHTML, clear, moneyHTML, escapeHTML, numInt,
 } from '../utils.js';
-import { get, stockOf, STORES } from '../db.js';
+import { get, getSettings, stockOf, STORES } from '../db.js';
 import { navigate } from '../router.js';
-import { pageHead, emptyState, toast } from '../components.js';
+import { pageHead, emptyState } from '../components.js';
 
 export function render(params = []) {
   const id = params[0];
@@ -20,7 +27,7 @@ export function render(params = []) {
   root.appendChild(
     pageHead({
       title: 'عرض المنتج',
-      sub: 'تفاصيل المنتج',
+      sub: 'تفاصيل القطعة — للتعديل استخدم زر «تعديل»',
       back: () => history.length > 1 ? history.back() : navigate('products'),
     })
   );
@@ -36,7 +43,7 @@ export function render(params = []) {
 async function boot(host, id) {
   const [product, settings] = await Promise.all([
     get(STORES.products, id),
-    (await import('../db.js')).getSettings(),
+    getSettings(),
   ]);
 
   if (!host.isConnected) return;
@@ -54,128 +61,164 @@ async function boot(host, id) {
     return;
   }
 
-  const cur = settings.currency || 'ILS';
   const stock = stockOf(product);
-  const sizes = getSizes(product);
+  const threshold = Number(settings.lowStockThreshold) || 5;
+  // Same three-band status the inventory cards use — one definition of
+  // "low", not a second competing one.
+  const status = stock === 0
+    ? { cls: 'badge--out', label: 'نفدت الكمية' }
+    : stock <= threshold
+      ? { cls: 'badge--low', label: `منخفض — تبقّى ${stock}` }
+      : { cls: 'badge--ok', label: 'متوفر' };
+
+  const variants = product.variants || [];
+  const sizes = [...new Set(variants.map((v) => v.size).filter(Boolean))];
+  const totalVariants = variants.reduce((t, v) => t + (Number(v.quantity) || 0), 0);
 
   clear(host);
+
+  /* --- header: image, name, category, status ------------------------- */
   host.appendChild(
     el(
-      'div.view',
-      {},
-      /* --- header --- */
+      'div.card',
+      { style: 'display:flex;gap:13px;align-items:flex-start;padding:14px;margin-bottom:13px' },
+      product.image
+        ? el('img.thumb.thumb--lg', { src: product.image, alt: product.name, style: 'flex:none' })
+        : el('div.thumb.thumb--lg.thumb-ph', { style: 'flex:none' }, fromHTML(icon('hanger'))),
       el(
-        'div.view__header',
-        {},
+        'div',
+        { style: 'min-width:0;flex:1' },
+        el('h2', { style: 'margin:0 0 6px;font-size:18px', text: product.name }),
         el(
-          'div.view__media',
-          {},
-          product.image
-            ? el('img', { src: product.image, alt: product.name, loading: 'lazy' })
-            : el('div.view__media-ph', {}, fromHTML(icon('hanger'))),
+          'div',
+          { style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center' },
+          el('span.badge.badge--brass', { text: product.category || 'غير مصنف' }),
+          el('span', { class: `badge ${status.cls}`, text: status.label })
         ),
-        el(
-          'div.view__info',
-          {},
-          el('h2.view__name', { text: product.name }),
-          product.sku ? el('div.view__sku', { text: `SKU: ${product.sku}` }) : null,
-          el('div.view__meta', { text: `التصنيف: ${product.category}` }),
-          product.description ? el('div.view__desc', { text: product.description }) : null,
-        )
-      ),
-
-      /* --- pricing & stock --- */
-      el(
-        'div.view__section',
-        {},
-        el('h3', { text: 'التسعير والمخزون' }),
-        el(
-          'div.view__grid',
-          {},
-          el(
-            'div.view__field',
-            {},
-            el('span.view__label', { text: 'سعر البيع' }),
-            el('b.view__value', { html: moneyHTML(product.price, settings.currency) })
-          ),
-          el(
-            'div.view__field',
-            {},
-            el('span.view__label', { text: 'سعر التكلفة' }),
-            el('b.view__value', { html: moneyHTML(product.costPrice, settings.currency) })
-          ),
-          el(
-            'div.view__field',
-            {},
-            el('span.view__label', { text: 'إجمالي المخزون' }),
-            el('b.view__value', { text: `${stock} قطعة` })
-          ),
-          el(
-            'div.view__field',
-            {},
-            el('span.view__label', { text: 'المتغيرات' }),
-            el('b.view__value', { text: `${product.variants?.length || 0} تركيبة` })
-          ),
-        )
-      ),
-
-      /* --- variants --- */
-      product.variants?.length ? el(
-        'div.view__section',
-        {},
-        el('h3', { text: 'تفاصيل المتغيرات' }),
-        el(
-          'table.view__variants',
-          {},
-          el(
-            'thead',
-            {},
-            el('tr', {}, el('th', { text: 'المقاس' }), el('th', { text: 'اللون' }), el('th', { text: 'الكمية' }))
-          ),
-          el(
-            'tbody',
-            {},
-            ...product.variants.map((v) => el(
-              'tr',
-              {},
-              el('td', { text: v.size || '—' }),
-              el('td', { text: v.color || '—' }),
-              el('td', { text: `${Number(v.quantity) || 0} قطعة` })
-            ))
-          )
-        )
-      ) : null,
-
-      /* --- description --- */
-      product.description ? el(
-        'div.view__section',
-        {},
-        el('h3', { text: 'الوصف' }),
-        el('p.view__desc', { text: product.description })
-      ) : null,
-
-      /* --- actions --- */
-      el(
-        'div.view__actions',
-        {},
-        el('button.btn.btn--primary', { type: 'button', onClick: () => navigate(`product/${product.id}`) },
-          fromHTML(icon('pencil')), el('span', { text: 'تعديل' })),
-        el('button.btn', { type: 'button', onClick: () => navigate('products') },
-          fromHTML(icon('arrowBack')), el('span', { text: 'العودة' })),
+        product.sku
+          ? el('div.tiny.muted', { style: 'margin-top:7px;direction:ltr;text-align:end', text: `SKU: ${product.sku}` })
+          : null
       )
     )
   );
 
-  function getSizes(p) {
-    const seen = new Set();
-    const out = [];
-    for (const v of p.variants || []) {
-      if (v.size && !seen.has(v.size) && (Number(v.quantity) || 0) > 0) {
-        seen.add(v.size);
-        out.push(v.size);
-      }
+  /* --- pricing & stock summary --------------------------------------- */
+  host.appendChild(
+    el(
+      'section.form-section',
+      {},
+      el('div.form-section__head', {}, el('span.form-section__num', { text: '1' }), el('h3', { text: 'السعر والمخزون' })),
+      el(
+        'div.grid-2',
+        { style: 'padding:0 4px 6px' },
+        priceField('سعر البيع', moneyHTML(product.price, settings.currency)),
+        priceField('سعر التكلفة', moneyHTML(product.costPrice, settings.currency)),
+        priceField('إجمالي المخزون', `${numInt(stock)} قطعة`),
+        priceField('عدد التركيبات', `${variants.length} تركيبة`),
+      ),
+      totalVariants !== stock
+        ? el('div.tiny', { style: 'padding:0 4px;color:var(--danger)', text: 'تنبيه: مجموع الكميات في الجدول لا يطابق الإجمالي — أعد حفظ الكميات من نموذج التعديل.' })
+        : null
+    )
+  );
+
+  /* --- sizes × colours × quantities (read-only table) ----------------- */
+  host.appendChild(
+    el(
+      'section.form-section',
+      {},
+      el(
+        'div.form-section__head',
+        {},
+        el('span.form-section__num', { text: '2' }),
+        el('h3', { text: 'المقاسات والألوان والكميات' }),
+        sizes.length ? el('span.tiny.muted', { text: sizes.join(' · ') }) : null
+      ),
+      variants.length
+        ? el('div.matrix-wrap', {}, variantsTable(variants, settings))
+        : el('p.tiny.muted', { style: 'padding:0 4px', text: 'لا توجد تركيبات مسجّلة — أضف مقاسات وكميات من نموذج التعديل.' })
+    )
+  );
+
+  /* --- description ---------------------------------------------------- */
+  if (product.description) {
+    host.appendChild(
+      el(
+        'section.form-section',
+        {},
+        el('div.form-section__head', {}, el('span.form-section__num', { text: '3' }), el('h3', { text: 'الوصف' })),
+        el('p', { style: 'margin:0;padding:0 4px;line-height:1.7;white-space:pre-wrap', text: product.description })
+      )
+    );
+  }
+
+  /* --- actions: edit goes to the form; nothing here saves ------------- */
+  host.appendChild(
+    el(
+      'div.form-actions',
+      {},
+      el('button.btn.btn--primary.btn--lg', {
+        type: 'button',
+        onClick: () => navigate(`product/${product.id}`),
+      }, fromHTML(icon('pencil')), el('span', { text: 'تعديل' })),
+      el('button.btn.btn--lg', {
+        type: 'button',
+        onClick: () => history.length > 1 ? history.back() : navigate('products'),
+      }, fromHTML(icon('arrowBack')), el('span', { text: 'عودة' }))
+    )
+  );
+
+  function priceField(label, valueHTML) {
+    return el(
+      'div.field',
+      { style: 'margin:0' },
+      el('span.field__label', { text: label }),
+      el('b', { style: 'font-size:16px', html: valueHTML })
+    );
+  }
+
+  function variantsTable(rows, set) {
+    const table = el('table.matrix');
+    table.appendChild(
+      el('thead', {}, el('tr', {},
+        el('th', { text: 'المقاس' }),
+        el('th', { text: 'اللون' }),
+        el('th', { text: 'الكمية' }),
+        el('th', { text: 'الحالة' })))
+    );
+    const tbody = el('tbody');
+    for (const v of rows) {
+      const qty = Number(v.quantity) || 0;
+      const name = v.color || '';
+      const def = (set.colors || []).find((c) => c.name === name);
+      const rowState = qty === 0
+        ? { label: 'نفدت', style: 'color:var(--danger)' }
+        : qty <= threshold
+          ? { label: 'منخفض', style: 'color:var(--warning)' }
+          : { label: 'متوفر', style: 'color:var(--success)' };
+      tbody.appendChild(
+        el(
+          'tr',
+          qty === 0 ? { style: 'opacity:.55' } : {},
+          el('th', { text: v.size || '—' }),
+          el('td', {},
+            el('span', { style: 'display:inline-flex;gap:6px;align-items:center' },
+              el('i.swatch', { style: `background:${def ? def.hex : '#e7ded1'};width:15px;height:15px` }),
+              el('span', { text: name || 'بدون لون' }))),
+          el('td', { text: String(qty) }),
+          el('td', {}, el('span.tiny', { style: rowState.style, text: rowState.label }))
+        )
+      );
     }
-    return out;
+    table.appendChild(tbody);
+    table.appendChild(
+      el('tfoot', {}, el('tr', {},
+        el('th', { text: 'الإجمالي' }),
+        el('td'),
+        el('td', { text: String(stock) }),
+        el('td')))
+    );
+    return table;
   }
 }
 

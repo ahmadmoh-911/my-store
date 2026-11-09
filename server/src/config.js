@@ -253,6 +253,14 @@ export function loadConfig(env = process.env) {
      * itself before anything happens, so enabling this grants nobody anything.
      */
     drive: readDriveConfig(env),
+
+    /**
+     * Web root for serving static files from the same server.
+     * Defaults to the project root (one level up from server/src).
+     */
+    webRoot: env.STOREHUB_WEB_ROOT
+      ? path.resolve(env.STOREHUB_WEB_ROOT)
+      : path.resolve(SERVER_ROOT, '..'),
   };
 }
 

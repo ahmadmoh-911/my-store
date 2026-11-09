@@ -418,6 +418,7 @@ function buildShell() {
 
   for (const [route, label] of [
     ['#/licenses', 'التراخيص'],
+    ['#/requests', 'الطلبات'],
     ['#/create', 'إنشاء ترخيص'],
   ]) {
     nav.append(
@@ -470,10 +471,13 @@ function route() {
   markActiveNav();
 
   const hash = window.location.hash || '#/licenses';
-  const detail = hash.match(/^#\/licenses\/([^/]+)$/);
+  const licenseDetail = hash.match(/^#\/licenses\/([^/]+)$/);
+  const requestDetail = hash.match(/^#\/requests\/([^/]+)$/);
 
-  if (detail) return renderLicenseDetail(decodeURIComponent(detail[1]));
+  if (licenseDetail) return renderLicenseDetail(decodeURIComponent(licenseDetail[1]));
+  if (requestDetail) return renderRequestDetail(decodeURIComponent(requestDetail[1]));
   if (hash === '#/create') return renderCreate();
+  if (hash === '#/requests') return renderRequests();
   return renderLicenseList();
 }
 
@@ -674,6 +678,244 @@ function renderCreate() {
   });
 
   contentHost.replaceChildren(form);
+}
+
+/**
+ * View: list of activation / support requests.
+ * Shows newest first, with status filter and a count badge for new requests.
+ */
+async function renderRequests() {
+  setPage('الطلبات', 'طلبات التفعيل والدعم من المتاجر');
+  showLoading();
+
+  let result;
+  try {
+    const query = new URLSearchParams({ limit: '50', offset: '0' });
+    if (state.requestStatus) query.set('status', state.requestStatus);
+    result = await api(`/api/activation-requests?${query}`);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return boot();
+    contentHost.replaceChildren(
+      el('div', { class: 'card' }, [
+        div('callout danger', describe(err, 'تعذّر تحميل قائمة الطلبات.')),
+        el('button', { class: 'btn btn-secondary', type: 'button', text: 'إعادة المحاولة', onclick: renderRequests }),
+      ]),
+    );
+    return;
+  }
+
+  const statusFilter = el(
+    'select',
+    { 'aria-label': 'تصفية حسب الحالة' },
+    [
+      ['', 'كل الحالات'],
+      ['new', 'جديد'],
+      ['in_progress', 'قيد المعالجة'],
+      ['completed', 'مكتمل'],
+      ['rejected', 'مرفوض'],
+    ].map(([value, label]) =>
+      el('option', { value, text: label, ...(state.requestStatus === value ? { selected: '' } : {}) }),
+    ),
+  );
+  statusFilter.addEventListener('change', () => {
+    state.requestStatus = statusFilter.value;
+    renderRequests();
+  });
+
+  const newCount = result.requests.filter((r) => r.status === 'new').length;
+
+  const rows = result.requests.map((request) =>
+    el('tr', {}, [
+      el('td', {}, [
+        el('button', {
+          class: 'link-button mono',
+          type: 'button',
+          text: request.id.slice(0, 8),
+          onclick: () => {
+            window.location.hash = `#/requests/${encodeURIComponent(request.id)}`;
+          },
+        }),
+      ]),
+      el('td', { text: request.storeName }),
+      el('td', { text: request.requesterName }),
+      el('td', {}, [statusBadgeRequest(request.status)]),
+      el('td', { text: formatDate(request.createdAt) }),
+      el('td', { text: request.type === 'activation' ? 'تفعيل' : request.type === 'device_transfer' ? 'نقل جهاز' : request.type === 'license_issue' ? 'مشكلة ترخيص' : 'دعم فني' }),
+    ]),
+  );
+
+  contentHost.replaceChildren(
+    el('div', { class: 'card' }, [
+      el('div', { class: 'card-header' }, [
+        el('h2', { class: 'card-title', text: `الطلبات (${result.total})` }),
+        el('span', {
+          class: `badge ${newCount > 0 ? 'badge-new' : ''}`,
+          text: newCount > 0 ? `جديد: ${newCount}` : '',
+          style: 'margin-left:12px',
+        }),
+        statusFilter,
+      ]),
+      result.requests.length === 0
+        ? el('div', { class: 'empty' }, [
+            el('p', { text: 'لا توجد طلبات بعد.' }),
+          ])
+        : el('div', { class: 'table-container' }, [
+            el('table', {}, [
+              el('thead', {}, [
+                el('tr', {}, [
+                  el('th', { text: 'المعرّف' }),
+                  el('th', { text: 'اسم المتجر' }),
+                  el('th', { text: 'طالب الطلب' }),
+                  el('th', { text: 'النوع' }),
+                  el('th', { text: 'الحالة' }),
+                  el('th', { text: 'تاريخ الإنشاء' }),
+                ]),
+              ]),
+              el('tbody', {}, rows),
+            ]),
+          ]),
+    ]),
+  );
+}
+
+/** Status badge for request list. */
+function statusBadgeRequest(status) {
+  const labels = {
+    new: 'جديد',
+    in_progress: 'قيد المعالجة',
+    completed: 'مكتمل',
+    rejected: 'مرفوض',
+  };
+  const classes = {
+    new: 'badge-new',
+    in_progress: 'badge-progress',
+    completed: 'badge-done',
+    rejected: 'badge-rejected',
+  };
+  return el('span', { class: `badge ${classes[status] || ''}`, text: labels[status] ?? status });
+}
+
+/**
+ * View: details of one activation request.
+ * Shows all fields and lets the admin change status and add a note.
+ */
+async function renderRequestDetail(id) {
+  setPage('تفاصيل الطلب', '');
+  showLoading();
+
+  let detail;
+  try {
+    detail = await api(`/api/activation-requests/${encodeURIComponent(id)}`);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) return boot();
+    contentHost.replaceChildren(
+      el('div', { class: 'card' }, [
+        div('callout danger', describe(err, 'تعذّر تحميل تفاصيل الطلب.')),
+        el('button', {
+          class: 'btn btn-secondary',
+          type: 'button',
+          text: 'رجوع للقائمة',
+          onclick: () => {
+            window.location.hash = '#/requests';
+          },
+        }),
+      ]),
+    );
+    return;
+  }
+
+  const { request } = detail;
+
+  const typeLabels = {
+    activation: 'تفعيل جديد',
+    device_transfer: 'نقل جهاز',
+    license_issue: 'مشكلة ترخيص',
+    support: 'دعم فني',
+  };
+
+  const fields = [
+    ['النوع', el('span', { text: typeLabels[request.type] || request.type })],
+    ['الحالة', statusBadgeRequest(request.status)],
+    ['اسم المتجر', el('span', { text: request.storeName })],
+    ['اسم طالب الطلب', el('span', { text: request.requesterName })],
+    ['وسيلة التواصل', el('span', { text: request.contact || '—' })],
+    ['إصدار التطبيق', el('span', { text: request.appVersion || '—' })],
+    ['المنصة', el('span', { text: request.platform || '—' })],
+    ['معرّف التثبيت', el('span', { class: 'mono', text: request.installId || '—' })],
+    ['الحساب المرتبط', el('span', { class: 'mono', text: request.googleSub || '—' })],
+    ['تاريخ الإنشاء', el('span', { text: formatDate(request.createdAt) })],
+    ['آخر تحديث', el('span', { text: formatDate(request.updatedAt) })],
+    ['الوصف', el('div', { style: 'white-space:pre-wrap; margin-top:8px', text: request.description })],
+  ];
+
+  // Status change form
+  const statusSelect = el('select', {},
+    [
+      ['new', 'جديد'],
+      ['in_progress', 'قيد المعالجة'],
+      ['completed', 'مكتمل'],
+      ['rejected', 'مرفوض'],
+    ].map(([value, label]) =>
+      el('option', { value, text: label, ...(request.status === value ? { selected: '' } : {}) }),
+    ),
+  );
+
+  const noteInput = el('textarea', { rows: '3', placeholder: 'ملاحظة داخلية (لا تظهر للعميل)' });
+  const licenseIdInput = el('input', { type: 'text', placeholder: 'معرّف الترخيص المرتبط (اختياري)' });
+
+  const saveBtn = el('button', { class: 'btn btn-primary', type: 'button', text: 'حفظ التغييرات' });
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    try {
+      await api(`/api/activation-requests/${encodeURIComponent(request.id)}/status`, {
+        method: 'POST',
+        body: {
+          status: statusSelect.value,
+          adminNote: noteInput.value.trim() === '' ? null : noteInput.value,
+          linkedLicenseId: licenseIdInput.value.trim() === '' ? null : licenseIdInput.value.trim(),
+        },
+      });
+      toast('حُفظت التغييرات', 'success');
+      renderRequestDetail(request.id);
+    } catch (err) {
+      toast(describe(err, 'تعذّر حفظ التغييرات'), 'error');
+      saveBtn.disabled = false;
+    }
+  });
+
+  contentHost.replaceChildren(
+    el('div', { class: 'card' }, [
+      el('h2', { class: 'card-title', text: 'بيانات الطلب' }),
+      el('dl', { class: 'detail-list' }, fields.map(([label, value]) =>
+        el('div', { class: 'detail-item' }, [el('dt', { text: label }), el('dd', {}, [value])]),
+      )),
+      el('div', { class: 'card', style: 'margin-top:20px' }, [
+        el('h2', { class: 'card-title', text: 'تعديل الحالة' }),
+        el('div', { class: 'form-row' }, [
+          el('div', { class: 'form-group' }, [
+            el('label', { for: 'req-status', text: 'الحالة' }),
+            statusSelect,
+          ]),
+          el('div', { class: 'form-group' }, [
+            el('label', { for: 'req-note', text: 'ملاحظة داخلية' }),
+            noteInput,
+          ]),
+          el('div', { class: 'form-group' }, [
+            el('label', { for: 'req-license', text: 'الترخيص المرتبط' }),
+            licenseIdInput,
+          ]),
+        ]),
+        el('div', { style: 'margin-top:12px' }, [saveBtn]),
+      ]),
+      el('button', {
+        class: 'btn btn-secondary',
+        type: 'button',
+        text: 'رجوع للقائمة',
+        style: 'margin-top:16px',
+        onclick: () => { window.location.hash = '#/requests'; },
+      }),
+    ]),
+  );
 }
 
 /**

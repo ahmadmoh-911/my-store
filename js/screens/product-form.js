@@ -94,16 +94,17 @@ function hydrate(p, settings) {
     costPrice: p?.costPrice ?? '',
     image: p?.image || '',
     createdAt: p?.createdAt || new Date().toISOString(),
-    sizes: p ? uniq((p.variants || []).map((v) => v.size)) : [...settings.sizes.slice(0, 4)],
-    colors: p ? uniq((p.variants || []).map((v) => v.color)) : [settings.colors[0]?.name].filter(Boolean),
+    sizes: p ? uniq((p.variants || []).map((v) => v.size)) : [],
+    colors: p ? uniq((p.variants || []).map((v) => v.color)) : [],
     qty: new Map(),
     errors: {},
   };
   if (p) {
     for (const v of p.variants || []) d.qty.set(key(v.size, v.color), Number(v.quantity) || 0);
   }
-  if (!d.sizes.length) d.sizes = [NO_SIZE];
-  if (!d.colors.length) d.colors = [NO_SIZE];
+  // Products with NO sizes AND NO colors get a single implicit variant (size='', color='')
+  // The UI will show a single quantity input instead of a matrix.
+  // Do NOT default to [NO_SIZE] here — empty arrays mean "no breakdown".
   return d;
 }
 
@@ -112,6 +113,12 @@ const key = (s, c) => `${s || NO_SIZE}|${c || NO_SIZE}`;
 
 function buildVariants(d) {
   const out = [];
+  // No sizes AND no colors → single implicit variant
+  if (!d.sizes.length && !d.colors.length) {
+    out.push({ size: '', color: '', quantity: Number(d.qty.get(key('', ''))) || 0 });
+    return out;
+  }
+  // Otherwise cross product (empty string in either dimension is treated as "no value")
   for (const s of d.sizes) {
     for (const c of d.colors) {
       out.push({ size: s, color: c, quantity: Number(d.qty.get(key(s, c))) || 0 });
@@ -557,6 +564,44 @@ function buildForm(d, settings, editingId) {
   /* --- matrix rendering ---------------------------------------------- */
   function paintMatrix() {
     clear(matrixHost);
+
+    // No sizes AND no colors → single quantity input
+    if (!d.sizes.length && !d.colors.length) {
+      const k = key('', '');
+      const stored = Number(d.qty.get(k)) || 0;
+      const input = el('input', {
+        type: 'number',
+        min: '0',
+        placeholder: 'الكمية',
+        value: stored ? String(stored) : '',
+        style: 'width:100%;max-width:140px;font-size:16px;padding:10px 12px',
+        onfocus: (e) => e.target.select(),
+        oninput: (e) => {
+          const v = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
+          if (v === 0 && e.target.value !== '' && parseFloat(e.target.value) < 0) e.target.value = '';
+          d.qty.set(k, v);
+          paintSummary();
+        },
+      });
+      if (stored > 0 && stored <= (Number(settings.lowStockThreshold) || 5)) input.classList.add('is-low');
+
+      matrixHost.appendChild(
+        el('div', { style: 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' },
+          el('label', { style: 'font-weight:600;color:var(--ink-2)', text: 'الكمية (منتج بلا مقاسات/ألوان): ' }),
+          input
+        )
+      );
+
+      const sizesEl = root()?.querySelector('#sizes-count');
+      if (sizesEl) sizesEl.textContent = 'لا مقاسات';
+      const colorsEl = root()?.querySelector('#colors-count');
+      if (colorsEl) colorsEl.textContent = 'لا ألوان';
+
+      paintSummary();
+      return;
+    }
+
+    // Otherwise: normal matrix with sizes/colors (empty string = no value)
     const sizes = d.sizes.length ? d.sizes : [NO_SIZE];
     const colors = d.colors.length ? d.colors : [NO_SIZE];
 
@@ -568,10 +613,18 @@ function buildForm(d, settings, editingId) {
       const tr = el('tr', {}, el('th', {}, colorDot(c), el('span', { text: c === NO_SIZE ? 'بدون لون' : c })));
       for (const s of sizes) {
         const k = key(s, c);
+        const stored = Number(d.qty.get(k)) || 0;
         const input = el('input', {
           type: 'number',
           min: '0',
-          value: String(d.qty.get(k) ?? 0),
+          // Zero starts EMPTY with a faint "0" placeholder (the same convention
+          // as the restock sheet's qty inputs), and focus selects whatever is
+          // there, so the owner types the number straight over it instead of
+          // erasing a "0" first. An emptied field still saves as 0 — the write
+          // side is untouched: buildVariants() coerces missing/empty to 0.
+          placeholder: '0',
+          value: stored ? String(stored) : '',
+          onfocus: (e) => e.target.select(),
           oninput: (e) => {
             const v = Math.max(0, parseInt(e.target.value || '0', 10) || 0);
             // Emptied rather than zeroed, so "no stock" and "a bad value" do not
@@ -633,9 +686,13 @@ function buildForm(d, settings, editingId) {
 
   function fillAll(v) {
     const n = Math.max(0, parseInt(v || '0', 10) || 0);
-    const sizes = d.sizes.length ? d.sizes : [NO_SIZE];
-    const colors = d.colors.length ? d.colors : [NO_SIZE];
-    for (const s of sizes) for (const c of colors) d.qty.set(key(s, c), n);
+    if (!d.sizes.length && !d.colors.length) {
+      d.qty.set(key('', ''), n);
+    } else {
+      const sizes = d.sizes.length ? d.sizes : [NO_SIZE];
+      const colors = d.colors.length ? d.colors : [NO_SIZE];
+      for (const s of sizes) for (const c of colors) d.qty.set(key(s, c), n);
+    }
     paintMatrix();
     toast(`تم ضبط ${n} لكل التركيبات`, 'ok', 1600);
   }
