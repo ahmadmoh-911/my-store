@@ -35,7 +35,7 @@
  */
 
 /** The one build-mode constant. `'interim'` or `'full'`. */
-export const MODE = 'interim';
+export const MODE = 'full';
 
 export const MODE_INTERIM = 'interim';
 export const MODE_FULL = 'full';

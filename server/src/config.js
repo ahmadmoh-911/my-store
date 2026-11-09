@@ -327,16 +327,44 @@ const REDIRECT_FLOWS = Object.freeze({
  * }}
  */
 function readGoogleConfig(env) {
+  // A flow's own variable always wins. When it is unset and the public URL of
+  // this deployment is known, the callback is derived from it, so a hosted
+  // deploy needs one URL instead of three hand-typed copies of it.
+  const base = readPublicUrl(env);
+  const derive = (flow) => env[flow.env] || (base ? `${base}${flow.path}` : null);
   return {
     clientId: env.GOOGLE_CLIENT_ID || null,
     clientSecret: env.GOOGLE_CLIENT_SECRET || null,
     // Kept for compatibility only. It is never authoritative in production: it
     // is the shared value this change exists to get away from.
     redirectUri: env.GOOGLE_REDIRECT_URI || null,
-    authRedirectUri: env.GOOGLE_AUTH_REDIRECT_URI || null,
-    adminRedirectUri: env.GOOGLE_ADMIN_REDIRECT_URI || null,
-    driveRedirectUri: env.GOOGLE_DRIVE_REDIRECT_URI || null,
+    authRedirectUri: derive(REDIRECT_FLOWS.customer),
+    adminRedirectUri: derive(REDIRECT_FLOWS.admin),
+    driveRedirectUri: derive(REDIRECT_FLOWS.drive),
   };
+}
+
+/**
+ * The public origin this deployment is reached at, without a trailing slash.
+ *
+ * `STOREHUB_PUBLIC_URL` is the explicit setting; `RENDER_EXTERNAL_URL` is set
+ * by Render on every service, so a Render deploy works without either being
+ * typed. Only an absolute http(s) origin is accepted; anything else reads as
+ * unset rather than producing a broken callback URL.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string} e.g. 'https://storehub.onrender.com', or '' when unknown
+ */
+export function readPublicUrl(env) {
+  const raw = (env.STOREHUB_PUBLIC_URL || env.RENDER_EXTERNAL_URL || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+    return url.origin;
+  } catch {
+    return '';
+  }
 }
 
 /**
@@ -497,7 +525,8 @@ function readAdminConfig(env, nodeEnv) {
  * @returns {string} the validated portal URL, or '' when unset
  */
 function readPortalUrl(env, nodeEnv) {
-  const raw = (env.STOREHUB_ADMIN_PORTAL_URL || '').trim();
+  const base = readPublicUrl(env);
+  const raw = (env.STOREHUB_ADMIN_PORTAL_URL || (base ? `${base}/admin/` : '')).trim();
   if (!raw) return '';
 
   let parsed;

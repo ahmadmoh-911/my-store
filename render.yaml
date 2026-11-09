@@ -1,0 +1,38 @@
+# Render Blueprint — Store Hub (app + admin portal + licence/auth API on one URL)
+#
+# Deploy: Render dashboard → New → Blueprint → pick this repository.
+# Render asks once for the values marked `sync: false`; nothing secret lives here.
+#
+# Google OAuth callbacks and the admin portal URL are derived at runtime from
+# RENDER_EXTERNAL_URL (set by Render), so they do not need to be typed here.
+# Register these three in Google Cloud Console → Credentials → your Web client:
+#   https://<service>.onrender.com/api/auth/google/callback
+#   https://<service>.onrender.com/api/admin/auth/callback
+#   https://<service>.onrender.com/api/drive/connect/callback
+
+services:
+  - type: web
+    name: storehub
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: .
+    region: frankfurt          # same region as the Supabase project (eu-central-1)
+    plan: free
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STOREHUB_TRUST_PROXY   # Render terminates TLS in front of the app
+        value: "1"
+      - key: STOREHUB_PEPPER        # generated once by Render; never change it after licences exist
+        generateValue: true
+      - key: SUPABASE_DB_URL        # Supabase → Connect → Session pooler (IPv4) URI
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: STOREHUB_ADMIN_SUB     # Google account `sub` of each admin, comma-separated
+        sync: false

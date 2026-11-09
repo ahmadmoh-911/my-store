@@ -1,0 +1,14 @@
+# Build context is the repo root (see server/Dockerfile). Keep secrets and
+# heavy artefacts out of the image context.
+.git
+**/node_modules
+**/.env
+**/.env.*
+!.env.example
+*.apk
+*.aab
+dist
+data
+tests
+server/test
+*.md

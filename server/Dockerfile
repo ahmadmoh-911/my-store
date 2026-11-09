@@ -22,6 +22,7 @@ COPY fonts ./fonts
 COPY icons ./icons
 COPY js ./js
 COPY admin ./admin
+COPY vendor ./vendor
 
 # Non-root user for security
 RUN addgroup -S storehub && adduser -S storehub -G storehub
@@ -31,6 +32,8 @@ USER storehub
 ENV PORT=8787
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
+# src/ lives in /app/src, so the default web root (src/../..) would be '/'.
+ENV STOREHUB_WEB_ROOT=/app
 
 EXPOSE 8787
 

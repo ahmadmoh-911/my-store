@@ -5,13 +5,13 @@
   "description": "Licence metadata backend for Store Hub. Stores licence and identity metadata only — never store contents.",
   "type": "module",
   "engines": {
-    "node": ">=22.9.0"
+    "node": ">=22.5.0"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.js",
+    "start": "node src/index.js",
     "test": "node --test",
-    "test:live": "node --env-file-if-exists=.env scripts/pg-live.mjs",
-    "issue": "node --env-file-if-exists=.env scripts/issue-license.mjs"
+    "test:live": "node scripts/pg-live.mjs",
+    "issue": "node scripts/issue-license.mjs"
   },
   "dependencies": {
     "pg": "^8.23.1"

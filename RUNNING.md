@@ -182,3 +182,22 @@ cat .env.example
 - `SUPABASE_SERVICE_ROLE_KEY`
 
 هذه القيم تبقى على السيرفر فقط.
+
+## النشر على Render (الطريقة الرسمية)
+
+التطبيق ولوحة الأدمن والـAPI كلهم بيشتغلوا على رابط واحد من نفس الحاوية (`server/Dockerfile`).
+
+1. Render → **New → Blueprint** → اختر مستودع `my-store`. الملف `render.yaml` بيجهز الخدمة.
+2. عبّي القيم اللي بيطلبها Render:
+   - `SUPABASE_DB_URL` — من Supabase → Connect → **Session pooler** (لازم pooler لأن Render ما بيدعم IPv6).
+   - `GOOGLE_CLIENT_ID` و `GOOGLE_CLIENT_SECRET` — من Google Cloud Console.
+   - `STOREHUB_ADMIN_SUB` — قيمة `sub` لحساب جوجل تبع الأدمن.
+   - `STOREHUB_PEPPER` بيولّده Render تلقائياً — **لا تغيّره أبداً** بعد إصدار أي ترخيص.
+3. روابط جوجل (callbacks) ورابط لوحة الأدمن بتنحسب تلقائياً من `RENDER_EXTERNAL_URL`.
+   سجّل الثلاثة في Google Cloud Console → Credentials → Authorized redirect URIs:
+   - `https://<اسم-الخدمة>.onrender.com/api/auth/google/callback`
+   - `https://<اسم-الخدمة>.onrender.com/api/admin/auth/callback`
+   - `https://<اسم-الخدمة>.onrender.com/api/drive/connect/callback`
+4. تحقق: `https://<اسم-الخدمة>.onrender.com/api/health` لازم يرجع `ok`، ولوحة الأدمن على `/admin/`.
+
+لو بدك دومين خاص، ضيف `STOREHUB_PUBLIC_URL=https://your-domain` وسجّل نفس المسارات عليه.
