@@ -135,9 +135,17 @@ test('SW-API: only the app shell navigation is cached as the offline document', 
     'the app shell is cached under both ./ and ./index.html',
   );
 
+  // The admin portal is not handled by this worker at all, so it can never
+  // replace the app shell and is never served a stale admin.js after a deploy.
   const adminWorker = loadWorker();
-  const adminNav = dispatch(adminWorker.fetchHandler, { method: 'GET', url: ORIGIN + '/admin/', mode: 'navigate' });
-  assert.equal(adminNav.respondWithCalled, true);
-  await adminNav.promise;
-  assert.deepEqual(adminWorker.puts, [], 'an admin navigation must not replace the app shell');
+  for (const [url, mode] of [
+    ['/admin/', 'navigate'],
+    ['/admin', 'navigate'],
+    ['/admin/admin.js', 'cors'],
+    ['/admin/admin.css', 'no-cors'],
+  ]) {
+    const r = dispatch(adminWorker.fetchHandler, { method: 'GET', url: ORIGIN + url, mode });
+    assert.equal(r.respondWithCalled, false, `${url} must go straight to the network`);
+  }
+  assert.deepEqual(adminWorker.puts, [], 'an admin request must not replace the app shell');
 });

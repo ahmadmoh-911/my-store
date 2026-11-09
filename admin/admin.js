@@ -447,12 +447,12 @@ function markActiveNav() {
 /**
  * Signs out.
  *
- * Uses the customer logout endpoint on purpose: the admin portal has no session
- * store of its own to clear, and the cookie is the session.
+ * Uses the admin logout endpoint, which ends only the admin session cookie, so
+ * a shop app signed in on the same origin is not logged out with it.
  */
 async function signOut() {
   try {
-    await api('/api/auth/logout', { method: 'POST', body: {} });
+    await api('/api/admin/auth/logout', { method: 'POST', body: {} });
   } catch {
     // A failed logout is not worth a modal: the local state is cleared either
     // way, and the server will refuse the old session on its own terms.
