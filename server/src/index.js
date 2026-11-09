@@ -6,6 +6,8 @@
  * without starting a socket.
  */
 
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { loadConfig, assertProductionRedirectUris, assertPostgresConfigured } from './config.js';
 import { createLicenseService } from './service.js';
 import { createAuthService } from './auth-service.js';
@@ -250,9 +252,11 @@ async function main() {
 
 // `import.meta.url === pathToFileURL(process.argv[1])` is the check for "run
 // directly" that survives symlinks and Windows path quirks.
+// pathToFileURL handles both POSIX ('/app/src/index.js') and Windows
+// ('C:\\...') paths; hand-building 'file:///' + path produced 'file:////app/…'
+// on Linux, so the server exited silently with code 0 inside Docker.
 const invokedDirectly =
-   process.argv[1] &&
-   import.meta.url === new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`).href;
+   Boolean(process.argv[1]) && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (invokedDirectly) {
    main().catch((err) => {
