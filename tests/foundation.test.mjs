@@ -327,7 +327,19 @@ section('7 · clock does not invent a server time');
   const est = clock.estimatedServerTime();
   ok('estimate tracks the server value, not the device clock', Math.abs(est - serverTime) < 2000, `est=${est} server=${serverTime}`);
   ok('estimate is ~5 minutes behind the device clock', Math.abs(clock.clockSkewMs()) > 4 * 60 * 1000);
-  ok('a large skew is reported as suspect', clock.isClockSuspect());
+  ok('a steady offset is NOT suspect (device runs slow/fast, nobody changed it)', !clock.isClockSuspect());
+  {
+    // Now the device clock is moved back 10 minutes after the server time was recorded.
+    const realNow = Date.now;
+    const shifted = realNow() - 10 * 60 * 1000;
+    const startPerf = globalThis.performance.now();
+    Date.now = () => shifted + (globalThis.performance.now() - startPerf);
+    try {
+      ok('a clock moved after the server time was recorded IS suspect', clock.isClockSuspect());
+    } finally {
+      Date.now = realNow;
+    }
+  }
 
   clock.resetTrustedTime();
   ok('reset returns the module to knowing nothing', !clock.hasTrustedTime());

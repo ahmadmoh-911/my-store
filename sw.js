@@ -66,7 +66,7 @@
 //       so BUILD must move with it. The cart panel drops the payment picker and
 //       carries the price increase inline.
 // v36 — New test suites added (restock, no-size-products, pdf-export) with mutation proofs; all 2288 tests pass.
-const BUILD = 'v38';
+const BUILD = 'v39';
 const CACHE_PREFIX = 'saher-shell-';
 const CACHE = `${CACHE_PREFIX}${BUILD}`;
 
