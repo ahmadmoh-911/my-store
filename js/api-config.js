@@ -98,19 +98,23 @@ export function getDefaultBase(group) {
 /**
  * Resolves the effective base for a client.
  *
- * - If a global API base is configured, returns the full origin URL.
+ * Always the *group* base, never a bare origin. Clients append their own
+ * endpoint to this value — `${base}/google/start`, `${base}/activate`, … — so
+ * returning only the origin would drop the `/api/<group>` segment and send the
+ * request to `<origin>/google/start`. That was the bug: with a configured
+ * origin the sign-in URL became `https://api.example.com/google/start`, and a
+ * base that looked like a page URL put the origin inside the path entirely.
+ *
+ * - If a global API base is configured, returns `${origin}${groupPath}`.
  * - Otherwise, returns the group-specific default path (same-origin).
  *
- * This is the value clients should use as their `baseUrl` when building
- * endpoint URLs.
- *
  * @param {'license'|'auth'|'drive'} group
- * @returns {string} Full origin or relative path
+ * @returns {string} e.g. 'https://api.example.com/api/auth', or '/api/auth'
  */
 export function resolveClientBase(group) {
+  const groupPath = getDefaultBase(group);
   const base = getApiBase();
-  if (base) return base;
-  return getDefaultBase(group);
+  return base ? `${base}${groupPath}` : groupPath;
 }
 
 /**

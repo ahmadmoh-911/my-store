@@ -380,7 +380,8 @@ export function getLicenseRecord() {
  * @param {{licenseId?: string, status?: string, expiresAt?: number|null,
  *          lastVerifiedAt?: string, lastServerTime?: number|null,
  *          linkedAccountId?: string|null,
- *          lastTrustedVerificationAt?: string}} patch
+ *          lastTrustedVerificationAt?: string,
+ *          sessionToken?: string|null}} patch
  */
 export async function saveLicenseRecord(patch = {}) {
   const existing = (await getLicenseRecord()) || {};
@@ -393,6 +394,13 @@ export async function saveLicenseRecord(patch = {}) {
     lastServerTime: patch.lastServerTime ?? existing.lastServerTime ?? null,
     linkedAccountId: patch.linkedAccountId ?? existing.linkedAccountId ?? null,
     lastTrustedVerificationAt: patch.lastTrustedVerificationAt ?? existing.lastTrustedVerificationAt ?? null,
+    // The licence session token activate() returns. It is the credential
+    // /verify and /bind authenticate with, so it has to survive a write;
+    // license-client.js reads it back (`verifyLicense`, `bindLicense`,
+    // `hasLocalSession`) and cannot re-fetch it. Dropping it here made every
+    // "تحقق الآن" fail with NO_SESSION and forced binding down the bare-code
+    // path, which the server rejects.
+    sessionToken: patch.sessionToken ?? existing.sessionToken ?? null,
   });
 }
 

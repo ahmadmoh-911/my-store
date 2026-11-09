@@ -48,6 +48,35 @@ async function scanNative() {
 
 const READER_ID = 'scan-reader';
 
+/** Minimum consecutive identical reads before accepting a code. */
+const STABILIZATION_READS = 3;
+/** Cool-down after a successful scan (ms) — not used here since modal closes. */
+/** Validates EAN-13, EAN-8, UPC-A checksum. Returns true if valid or not a checksummed format. */
+function validateChecksum(code) {
+  const digits = String(code).replace(/\D/g, '');
+  if (digits.length === 13) return ean13Check(digits);   // EAN-13
+  if (digits.length === 8) return ean8Check(digits);     // EAN-8
+  if (digits.length === 12) return upcACheck(digits);    // UPC-A
+  // Code128, QR, etc. have no simple checksum — accept as-is
+  return true;
+}
+
+function ean13Check(d) {
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(d[i]) * (i % 2 === 0 ? 1 : 3);
+  return (10 - (sum % 10)) % 10 === Number(d[12]);
+}
+function ean8Check(d) {
+  let sum = 0;
+  for (let i = 0; i < 7; i++) sum += Number(d[i]) * (i % 2 === 0 ? 3 : 1);
+  return (10 - (sum % 10)) % 10 === Number(d[7]);
+}
+function upcACheck(d) {
+  let sum = 0;
+  for (let i = 0; i < 11; i++) sum += Number(d[i]) * (i % 2 === 0 ? 3 : 1);
+  return (10 - (sum % 10)) % 10 === Number(d[11]);
+}
+
 /** Picks the rear camera — `facingMode` is unreliable inside an Android WebView. */
 async function pickCamera() {
   const cameras = await window.Html5Qrcode.getCameras();
@@ -74,12 +103,13 @@ function scanWeb() {
     let settled = false;
     let scanner = null;
     let started = false;
+    /** Stabilization state */
+    let lastCode = '';
+    let consecutive = 0;
 
     const done = (value) => {
       if (settled) return;
       settled = true;
-      // The camera has to be released before the modal goes away, otherwise the
-      // LED stays on and the next scan fails to acquire the device.
       stop().finally(() => {
         m.close();
         resolve(value);
@@ -104,7 +134,7 @@ function scanWeb() {
         {},
         reader,
         el('p.tiny.muted.scan__hint', {
-          text: 'وجّه الكاميرا نحو الباركود — سيُقرأ تلقائياً.',
+          text: 'وجّه الكاميرا نحو الباركود — سيُقرأ تلقائياً بعد تثبيته.',
           style: { marginTop: '10px', textAlign: 'center' },
         })
       ),
@@ -115,7 +145,21 @@ function scanWeb() {
       },
     });
 
-    const onDecoded = (text) => done(String(text).trim());
+    const onDecoded = (text) => {
+      const code = String(text).trim();
+      // Ignore too-short readings
+      if (code.length < 4) return;
+      // Validate checksum for known formats
+      if (!validateChecksum(code)) return;
+      // Stabilization: require N consecutive identical reads
+      if (code === lastCode) {
+        consecutive++;
+      } else {
+        lastCode = code;
+        consecutive = 1;
+      }
+      if (consecutive >= STABILIZATION_READS) done(code);
+    };
     const onDecodeError = () => {
       /* not a barcode this frame — keep scanning */
     };

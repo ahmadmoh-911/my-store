@@ -31,6 +31,12 @@ import {
   fetchPreparedBackup,
 } from '../backup-scheduler.js';
 import { getDriveStatus, getDriveAccessToken, disconnectDrive, connectDriveInPopup } from '../drive-auth-client.js';
+import { getEntitlement, getEntitlementMessage, verifyAndUpdate, ENTITLEMENT_STATE } from '../entitlement.js';
+import { activateLicense, bindLicense } from '../license-client.js';
+import { getCurrentAccount } from '../auth-client.js';
+import { isInterim } from '../build-config.js';
+import { activationStatus, ACTIVATION_TTL_DAYS } from '../interim-activation.js';
+import { runFileExport, runFileImport, backupReminderText } from '../data-transfer-ui.js';
 
 export function render() {
   const root = el('div.screen', { id: 'screen-settings' });
@@ -233,15 +239,16 @@ async function boot(host) {
           statBox(String(purchases.length), 'تجديد كمية')
         ),
         el('p.tiny.muted', { style: 'margin-bottom:13px', text: `حجم البيانات الحالي تقريباً: ${sizeLabel}. كل شيء محفوظ محلياً في هذا الجهاز فقط.` }),
+        backupReminderText() ? el('p.field__hint', { style: 'color:var(--brass-deep);margin-bottom:10px', text: backupReminderText() }) : null,
         el(
           'div.export-row',
           {},
-          el('button.btn.btn--primary', { type: 'button', onClick: (e) => doExport(e.currentTarget) }, fromHTML(icon('download')), el('span', { text: 'تصدير نسخة احتياطية' })),
-          el('button.btn.btn--soft', { type: 'button', onClick: (e) => doImport(e.currentTarget) }, fromHTML(icon('upload')), el('span', { text: 'استعادة من ملف' }))
+          el('button.btn.btn--primary', { type: 'button', onClick: (e) => doExport(e.currentTarget) }, fromHTML(icon('download')), el('span', { text: 'تصدير نسخة احتياطية (ملف)' })),
+          el('button.btn.btn--soft', { type: 'button', onClick: (e) => doImport(e.currentTarget) }, fromHTML(icon('upload')), el('span', { text: 'استيراد نسخة احتياطية' }))
         ),
         el('p.tiny.muted', {
           style: 'margin-top:11px',
-          text: 'الملف يشمل المنتجات والمقاسات والألوان والكميات وفواتير البيع والمرتجعات والموردين وفواتير الشراء والدفعات وعمليات تجديد الكمية وبيانات المتجر والإعدادات.',
+          text: 'الملف يشمل كل جداول التطبيق تلقائياً: المنتجات والمقاسات والألوان والكميات ودفعات المخزون وفواتير البيع والمرتجعات والموردين وفواتير الشراء والدفعات وعمليات تجديد الكمية والإعدادات والصور، مع أعداد كل جدول والمجاميع المالية وبصمة تحقق (SHA-256).',
         })
       )
     ])
@@ -274,7 +281,10 @@ async function boot(host) {
   let drive = null;
   let driveRecord = null;
 
-  host.appendChild(
+  // Interim build: there is no server, so the Drive group would only ever show
+  // a connection error. It is not rendered at all rather than rendered broken —
+  // and no network call is made for it.
+  if (!isInterim()) host.appendChild(
     group('drive', `النسخ الاحتياطي في Google Drive`, 'database', [
       el(
         'div.settings-body',
@@ -295,6 +305,194 @@ async function boot(host) {
       ),
     ]),
   );
+
+  /* --- 3c · licence ----------------------------------------------------
+   *
+   * The same job this screen already does for Google Drive, for the other
+   * question the owner has: "is this device allowed to sell?" It shows the
+   * decision the checkout path will make, in words, and offers the one action
+   * that can change it — entering a licence code. It never computes
+   * entitlement itself; `getEntitlement` is the single source of truth and this
+   * group only renders its answer.
+   * ------------------------------------------------------------------ */
+  const licenceStatusLine = el('div.licence-status');
+  const licenceActions = el('div.export-row');
+  let entitlement = null;
+
+  // Interim build: replace the licence group with the local date-code status.
+  // No network, no Google, no licence server — just "how many days are left"
+  // and where to get a new code.
+  if (isInterim()) {
+    const st = activationStatus();
+    const daysText = st.active
+      ? `متبقٍ ${st.daysRemaining} يوماً من أصل ${ACTIVATION_TTL_DAYS}.`
+      : st.reason === 'expired'
+        ? 'انتهت صلاحية التفعيل.'
+        : st.reason === 'clock'
+          ? 'تاريخ الجهاز غير صحيح أو تم إرجاعه إلى الوراء.'
+          : 'لم يُفعَّل بعد.';
+    host.appendChild(
+      group('interim-activation', 'التفعيل (نسخة مؤقتة)', 'checkCircle', [
+        el('div.settings-body', {},
+          el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px' },
+            el('b', { text: st.active ? `مفعّلة — ${st.daysRemaining} يوم` : 'غير مفعّلة' }),
+            el('span.tiny.muted', { text: daysText })),
+          el('button.btn.btn--soft', { type: 'button', onClick: () => navigate('interim') },
+            fromHTML(icon('checkCircle')), el('span', { text: 'إدخال كود التفعيل' })),
+        ),
+      ]),
+    );
+  }
+
+  if (!isInterim()) host.appendChild(
+    group('licence', 'الترخيص والتسجيل', 'checkCircle', [
+      el('div.settings-body', {}, licenceStatusLine, licenceActions),
+    ]),
+  );
+
+  /** Arabic label for an entitlement state, for the bold status word. */
+  function licenceStateLabel(state) {
+    switch (state) {
+      case ENTITLEMENT_STATE.ACTIVE: return 'الترخيص نشط';
+      case ENTITLEMENT_STATE.ACTIVE_NEEDS_VERIFICATION: return 'نشط — يحتاج تحقق';
+      case ENTITLEMENT_STATE.OFFLINE_GRACE: return 'نشط (بدون اتصال)';
+      case ENTITLEMENT_STATE.OFFLINE_GRACE_EXPIRED: return 'انتهت فترة السماح';
+      case ENTITLEMENT_STATE.UNACTIVATED: return 'غير مفعّل';
+      case ENTITLEMENT_STATE.UNAUTHENTICATED: return 'غير مسجَّل';
+      case ENTITLEMENT_STATE.ACCOUNT_MISMATCH: return 'حساب مختلف';
+      case ENTITLEMENT_STATE.SUSPENDED: return 'معلّق';
+      case ENTITLEMENT_STATE.EXPIRED: return 'منتهي';
+      case ENTITLEMENT_STATE.REVOKED: return 'ملغى';
+      case ENTITLEMENT_STATE.CLOCK_SUSPECT: return 'ساعة غير موثوقة';
+      default: return 'حالة الترخيص';
+    }
+  }
+
+  async function refreshLicence() {
+    try {
+      entitlement = await getEntitlement();
+    } catch (err) {
+      console.error('[settings] entitlement read failed', err);
+      entitlement = null;
+    }
+    try {
+      await paintLicence();
+    } catch (err) {
+      console.error('[settings] licence paint failed', err);
+    }
+  }
+
+  async function paintLicence() {
+    clear(licenceStatusLine);
+    clear(licenceActions);
+
+    if (!entitlement) {
+      licenceStatusLine.appendChild(el('p.tiny.muted', { text: 'تعذّر قراءة حالة الترخيص.' }));
+      return;
+    }
+
+    licenceStatusLine.appendChild(
+      el(
+        'div',
+        { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px' },
+        el('b', { text: licenceStateLabel(entitlement.state) }),
+        el('span.tiny.muted', { text: await getEntitlementMessage() }),
+      ),
+    );
+
+    const lic = entitlement.license;
+    if (lic?.licenseId) {
+      const expiry = lic.expiresAt
+        ? new Date(lic.expiresAt).toLocaleDateString('ar', { dateStyle: 'medium' })
+        : 'بلا انتهاء';
+      licenceStatusLine.appendChild(
+        el('p.tiny.muted', { style: 'margin:0 0 4px', text: `معرّف الترخيص: ${lic.licenseId}` }),
+      );
+      licenceStatusLine.appendChild(
+        el('p.tiny.muted', { style: 'margin:0 0 4px', text: `تاريخ الانتهاء: ${expiry}` }),
+      );
+    }
+
+    if (entitlement.canSell) {
+      licenceActions.appendChild(
+        el('button.btn.btn--soft', { type: 'button', onClick: (e) => doVerifyLicence(e.currentTarget) },
+          el('span', { text: 'تحقق الآن' })),
+      );
+    } else {
+      licenceActions.appendChild(
+        el('button.btn.btn--primary', { type: 'button', onClick: (e) => doActivateLicence(e.currentTarget) },
+          fromHTML(icon('checkCircle')), el('span', { text: 'تفعيل الترخيص' })),
+      );
+    }
+  }
+
+  /** Runs a licence action behind a spinner, then repaints the group. */
+  async function withLicenceBusy(btn, label, fn) {
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = `${fromHTML(icon('spinner'))}<span>${label}</span>`;
+    }
+    try {
+      await fn();
+    } catch (err) {
+      console.error(err);
+      toast(err?.message || 'تعذّر إتمام العملية', 'err');
+    } finally {
+      await refreshLicence();
+    }
+  }
+
+  async function doActivateLicence(btn) {
+    const entered = prompt('أدخل كود الترخيص');
+    if (!entered) return;
+    await withLicenceBusy(btn, 'جارٍ التفعيل…', async () => {
+      const res = await activateLicense(entered.trim());
+      if (!res.ok) {
+        toast(res.error?.message || 'تعذّر تفعيل الترخيص', 'err');
+        return;
+      }
+
+      // A licence only turns the badge green once it is tied to a signed-in
+      // Google account: `getEntitlement` reports UNAUTHENTICATED with
+      // `canSell: false` while there is no account, no matter how valid the
+      // code is. So activation is not "done" until the code is bound to the
+      // account. The screen used to toast "تم تفعيل الترخيص" here and stop,
+      // which is how a store could see a success message next to a badge that
+      // still read "غير مسجَّل" and a checkout that still refused to sell.
+      let account = null;
+      try {
+        account = await getCurrentAccount();
+      } catch { /* treat a failed lookup as "not signed in" */ }
+
+      if (!account?.googleSub) {
+        // Activation itself succeeded; the licence is cached. Send the owner to
+        // the screen that owns Google sign-in so the badge can actually flip.
+        toast('تم تفعيل الكود — سجّل الدخول بـ Google لإتمام التفعيل', 'warn');
+        navigate('activate');
+        return;
+      }
+
+      // Binding ties the licence to the account so the entitlement engine will
+      // report ACTIVE / canSell. It is still best-effort: activation already
+      // succeeded, and a later launch retries.
+      let bound = false;
+      try {
+        const bind = await bindLicense(account.googleSub);
+        bound = Boolean(bind?.ok);
+      } catch { /* keep the successful activation */ }
+
+      if (bound) toast('تم تفعيل الترخيص', 'ok');
+      else toast('تم تفعيل الكود، لكن تعذّر ربطه بالحساب — أعد المحاولة', 'err');
+    });
+  }
+
+  async function doVerifyLicence(btn) {
+    await withLicenceBusy(btn, 'جارٍ التحقق…', async () => {
+      const { verificationResult } = await verifyAndUpdate();
+      if (verificationResult?.ok) toast('الترخيص سليم', 'ok');
+      else toast(verificationResult?.error?.message || 'تعذّر التحقق من الترخيص', 'err');
+    });
+  }
 
   /* --- 4 · about ------------------------------------------------------- */
   const wa = (number, label) =>
@@ -326,6 +524,11 @@ async function boot(host) {
         ),
         el('div.about-credits__label.tiny.muted', { text: 'للتواصل والدعم:' }),
         el('div.about-credits__row.about-credits__row--wa', {}, wa('972598191325', 'أحمد المصري'), wa('972568802803', 'إبراهيم خلف')),
+        el('button.btn.btn--soft', {
+          type: 'button',
+          text: 'إرسال طلب تفعيل أو دعم للإدارة',
+          onClick: () => navigate('activation-request'),
+        }),
         el('div.about-credits__brand', { text: 'managed by :  Ahmad & Ibrheam' })
       )
     ])
@@ -368,24 +571,21 @@ async function boot(host) {
   );
   host.appendChild(el('div.form-actions', {}, saveBtn));
 
+  /**
+   * File export/import now go through js/data-transfer.js — the versioned,
+   * fingerprinted, all-or-nothing format. The old `exportAll()`/`prepareRestore`
+   * path is kept only for the Google Drive group above (which uploads the same
+   * logical snapshot `backup.js` has always produced).
+   *
+   * Both delegate their own busy state, verification and summary dialogs, so a
+   * failure can never be reported as a success here.
+   */
   async function doExport(btn) {
-    if (btn) btn.disabled = true;
-    const originalText = btn ? btn.innerHTML : '';
-    if (btn) btn.innerHTML = `${fromHTML(icon('spinner'))}<span>جاري التصدير…</span>`;
-    try {
-      const data = await exportAll();
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const ok = await downloadBlob(blob, `saher-backup_${isoDate(new Date())}.json`);
-      toast(ok ? 'تم تصدير النسخة الاحتياطية' : 'تعذّر تصدير النسخة الاحتياطية', ok ? 'ok' : 'err');
-    } catch (e) {
-      console.error(e);
-      toast('تعذّر التصدير', 'err');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-      }
-    }
+    await runFileExport({ button: btn });
+  }
+
+  async function doImport(btn) {
+    await runFileImport({ button: btn });
   }
 
   /* ------------------------------------------------------------------ *
@@ -616,66 +816,7 @@ async function boot(host) {
   }
 
   async function doImport(btn) {
-    if (btn) btn.disabled = true;
-    const originalText = btn ? btn.innerHTML : '';
-    if (btn) btn.innerHTML = `${fromHTML(icon('spinner'))}<span>جاري الاستيراد…</span>`;
-    const file = await pickFile('application/json,.json');
-    if (!file) {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-      }
-      return;
-    }
-
-    let data;
-    try {
-      data = JSON.parse(await readFileAsText(file));
-    } catch {
-      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
-      return toast('الملف ليس JSON صالحاً', 'err');
-    }
-
-    // One validator for both restore paths. The Drive restore and this file
-    // import now agree by construction about what a valid backup is, because
-    // they are literally the same function — which is the point of §9's
-    // "reuse rather than duplicate". It also accepts the older bare
-    // `exportAll()` files this button has always produced.
-    const prepared = prepareRestore(data);
-    if (!prepared.ok) {
-      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
-      return toast(prepared.message || 'ملف النسخة الاحتياطية غير صالح', 'err');
-    }
-
-    const nP = prepared.counts.products;
-    const nS = prepared.counts.sales;
-    const nU = prepared.counts.suppliers;
-    const nI = prepared.counts.supplierInvoices;
-
-    const yes = await confirmDialog({
-      title: 'استعادة النسخة؟',
-      message: `سيُستبدل المحتوى الحالي (${nP} منتج · ${nS} فاتورة بيع · ${nU} مورد · ${nI} فاتورة شراء). لا يمكن التراجع.`,
-      confirmLabel: 'استعادة',
-    });
-    if (!yes) {
-      if (btn) { btn.disabled = false; btn.innerHTML = originalText; }
-      return;
-    }
-
-    try {
-      await applyRestore(dbApi, prepared);
-      await celebrate({ title: 'تمت الاستعادة', sub: `${nP} منتج · ${nS} فاتورة`, ms: 1300 });
-      navigate('dashboard');
-      setTimeout(() => location.reload(), 400);
-    } catch (e) {
-      console.error(e);
-      toast('تعذّرت الاستعادة', 'err');
-    } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-      }
-    }
+    await runFileImport({ button: btn });
   }
 
   /* The whole "danger zone" group is gone — the spec asks for it to be
@@ -687,7 +828,15 @@ async function boot(host) {
   // already usable, and the two facts it adds — connected, last backup — should
   // appear when they arrive rather than hold the whole page for a network call
   // that may be to an unreachable server.
-  refreshDrive();
+  //
+  // In the interim build there is no server at all: the group is not drawn and
+  // this is not called, so the screen makes NO network request.
+  if (!isInterim()) refreshDrive();
+
+  // Licence state is a local computation (no network), but it is still painted
+  // after the screen rather than awaited, so a slow IndexedDB read can never
+  // hold Settings hostage. The interim build uses the gate group instead.
+  if (!isInterim()) refreshLicence();
 }
 
 /* ------------------------------------------------------------------ *

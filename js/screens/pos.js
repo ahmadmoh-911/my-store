@@ -32,7 +32,7 @@ import {
 import { emptyState, openSheet, toast } from '../components.js';
 import { scanBarcode, reportMissing } from '../scanner.js';
 import { navigate } from '../router.js';
-import { addLine, totalItems, subscribe } from '../cart-store.js';
+import { addLine, totalItems, subscribe, firstLotFor } from '../cart-store.js';
 
 let query = '';
 let category = 'all';
@@ -106,6 +106,11 @@ export function render(params = []) {
     badge.classList.toggle('is-live', n > 0);
   });
 
+  // Opening the till re-reads the shelf: a product added or restocked on
+  // another screen must be sellable the moment this screen opens, without
+  // closing the app. The module cache below survives across visits, so it is
+  // dropped here and paintProducts() refills it from IndexedDB.
+  invalidateCache();
   paintProducts(root);
   // The router only appends the screen to #view *after* render() returns, so the
   // badge is not in the document yet. One frame later the screen is mounted, so
@@ -146,7 +151,7 @@ let cacheReady = null;
  * `paintProducts()` is async, so a fast tap on a product card (or the
  * `#/pos/<id>` pre-select) can run before the first load has resolved.
  */
-function ensureCache() {
+export function ensureCache() {
   if (cache.settings) return Promise.resolve(cache);
   if (!cacheReady) {
     cacheReady = Promise.all([listProducts(), getSettings()]).then(([products, settings]) => {
@@ -158,9 +163,34 @@ function ensureCache() {
   return cacheReady;
 }
 
-function invalidateCache() {
+/**
+ * Declares this screen's copy of the shelf stale. Exported because it is the
+ * single switch the refresh paths below (and the tests) drive: the cache used
+ * to be loaded on the very first open and then served forever — `invalidate`
+ * existed but nothing called it, so a product added or restocked elsewhere
+ * only reached the till after closing the app.
+ */
+export function invalidateCache() {
   cache = { products: [], settings: null };
   cacheReady = null;
+}
+
+/* --- live refresh --------------------------------------------------- *
+ *
+ * Fired by products.js `invalidate()` — which the product form (save/delete),
+ * the restock sheet (via the inventory screen) and checkout (a sale) all
+ * reach. While the till is open, the grid repaints from IndexedDB straight
+ * away; while it is closed, render() drops the cache on every mount anyway,
+ * so nothing is missed. The registration is module-level and guarded, because
+ * this module is also loaded under node tests, where there is no window.
+ * ------------------------------------------------------------------- */
+const PRODUCTS_CHANGED_EVENT = 'storehub:products-changed'; // fired by products.js invalidate()
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener(PRODUCTS_CHANGED_EVENT, () => {
+    invalidateCache();
+    paintProducts(); // no-op unless #screen-pos is actually mounted
+  });
 }
 
 async function paintProducts(screenRoot) {
@@ -557,14 +587,23 @@ async function handleScan() {
  * is where the quantity ceiling (the variant's real stock) and the "never
  * negative" rules live — this function only knows which product and which
  * variant, and which of the two outcomes to tell the owner about.
+ *
+ * «السعر يتبع الدفعة» (الخيار أ): السعر المعروض هنا هو سعر بيع **أقدم دفعة**
+ * لهذا المقاس (FIFO) — وهو نفسه الذي ستسجّله الفاتورة — لا «آخر سعر»
+ * للمنتج، فقد تغيّر آخر سعر بوريدٍ جديد لم يُبَع بعد. بلا دفعات للمقاس
+ * (بيانات قديمة أو مستوردة) يبقى سعر المنتج هو المعروض، كما يفعل البيع
+ * نفسه في db.createSale. الإجمالي المعروض في السلة يساوي إذن ما ستحسبه
+ * شاشة التأكيد وما ستخزّنه الفاتورة في الحالات العادية.
  */
-function addItem(product, variant) {
+async function addItem(product, variant) {
   const key = `${product.id}|${variant.size}|${variant.color}`;
   const max = Number(variant.quantity) || 0;
   if (!max) {
     toast('هذه القطعة نافدة من المخزون', 'warn');
     return;
   }
+
+  const lot = await firstLotFor(product.id, variant.size, variant.color);
 
   const outcome = addLine({
     key,
@@ -574,8 +613,10 @@ function addItem(product, variant) {
     size: variant.size || '',
     color: variant.color || '',
     qty: 1,
-    price: Number(product.price) || 0,
-    costPrice: Number(product.costPrice) || 0,
+    price: lot ? Number(lot.sellingPrice) || 0 : Number(product.price) || 0,
+    // التكلفة للعرض فقط (الفاتورة تحسب تكلفتها من الدفعات فعلًا)، لكنها تُؤخذ
+    // من الدفعة نفسها حتى لا يظهر سطر بسعر دفعة وتكلفة دفعة أخرى.
+    costPrice: lot ? Number(lot.costPrice) || 0 : Number(product.costPrice) || 0,
     max,
   });
 

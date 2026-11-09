@@ -19,12 +19,17 @@
  * quantities, two totals and two checkout buttons that can disagree with each
  * other. Everything the old column showed lives here now: the pieces with their
  * size and colour, the quantity stepper, the unit price, the line total, the
- * discount, the payment method and the button that finishes the sale.
+ * discount, the extra amount and the button that finishes the sale.
+ *
+ * Payment is deliberately absent: the source and the account are one, so there
+ * is nothing for the owner to choose. The invoice record still carries a
+ * paymentMethod field — always 'cash' — so old backups and reports keep
+ * reading exactly as they always did.
  *
  * State comes from cart-store.js, which is the single source of truth; the POS
  * screen writes to the same store when a product is tapped.
  */
-import { el, fromHTML, clear, moneyHTML, num, debounce, nudge } from './utils.js';
+import { el, fromHTML, clear, moneyHTML, debounce, nudge } from './utils.js';
 import { icon } from './icons.js';
 import { confirmDialog } from './components.js';
 import { getSettings } from './db.js';
@@ -32,7 +37,7 @@ import { confirmAndCompleteSale, isCheckingOut, onCheckoutState } from './checko
 import {
   cart, discount, subtotal, discountAmount, grandTotal, totalItems,
   setQty, removeLine, clearCart, subscribe,
-  getPaymentMethod, setPaymentMethod, PAYMENT_METHODS,
+  priceIncrease, setPriceIncrease,
   isPanelOpen, setPanelOpen, setDiscount,
 } from './cart-store.js';
 
@@ -45,6 +50,9 @@ let bar = null;
 let panel = null;
 let scrim = null;
 let peekTimer = null;
+
+/** Whether the extra-amount input is unfolded under the discount box. */
+let increaseOpen = false;
 
 async function loadCurrency() {
   if (currencyLoaded) return;
@@ -140,20 +148,19 @@ function onRemoveLine(line) {
 }
 
 /* ------------------------------------------------------------------ *
- * Discount + payment + totals
+ * Discount + extra amount + totals
  * ------------------------------------------------------------------ */
 
 /**
- * The discount box.
+ * The discount box — a FIXED amount only.
  *
- * Rebuilt on every repaint, which would steal focus mid-typing, so the caret is
- * put back where it was. Values are clamped by setDiscount(): a negative
- * discount is not a surcharge and a percentage over 100 is not a negative total,
- * so both are refused here rather than showing up as a strange invoice later.
+ * The owner removed the percentage option from the interface: one field, one
+ * meaning (a discount of 30 on a 130 basket is 100). Rebuilt on every repaint,
+ * which would steal focus mid-typing, so the caret is put back where it was.
+ * setDiscount() refuses a negative value and money.js clamps to the subtotal,
+ * so neither a minus nor a discount above the bill can reach the record.
  */
 function discountRow() {
-  const isPct = discount.type === 'percent';
-
   return el(
     'div.promo-input.cb-discount',
     {},
@@ -162,14 +169,14 @@ function discountRow() {
       type: 'number',
       min: '0',
       inputmode: 'decimal',
-      step: isPct ? '1' : '0.5',
-      'aria-label': isPct ? 'نسبة الخصم' : 'مبلغ الخصم',
-      placeholder: isPct ? 'نسبة %' : 'مبلغ خصم',
+      step: '0.5',
+      'aria-label': 'مبلغ الخصم',
+      placeholder: 'مبلغ خصم',
       value: discount.value || '',
       oninput: debounce((e) => {
         const raw = e.target.value;
         const v = parseFloat(raw);
-        setDiscount(discount.type, Number.isFinite(v) ? v : 0);
+        setDiscount(Number.isFinite(v) ? v : 0);
         // A rejected value is shown as rejected: the box is emptied rather than
         // left holding a number the totals do not agree with.
         if (!Number.isFinite(v) || v < 0) e.target.value = '';
@@ -181,52 +188,99 @@ function discountRow() {
         }
       }, 220),
     }),
-    el(
-      'div.seg',
-      {},
-      el('button', {
-        type: 'button',
-        text: currency,
-        'aria-pressed': isPct ? 'false' : 'true',
-        class: isPct ? '' : 'is-active',
-        onClick: () => { setDiscount('fixed', discount.value); paintBar(); },
-      }),
-      el('button', {
-        type: 'button',
-        text: '%',
-        'aria-pressed': isPct ? 'true' : 'false',
-        class: isPct ? 'is-active' : '',
-        onClick: () => { setDiscount('percent', discount.value); paintBar(); },
-      })
-    )
+    el('span', {
+      text: currency,
+      style: 'font-size:11px;color:var(--ink-3);font-weight:700;padding-inline-end:4px',
+    })
   );
 }
 
-function paymentRow() {
+/**
+ * The extra-amount box ("إضافة مبلغ للبيع").
+ *
+ * It lives INLINE under the discount box — a small plus button unfolds it in
+ * the same totals list — rather than in a separate dialog: the owner stays
+ * looking at the basket while typing it, and the same figure is what the
+ * confirmation, the receipt and js/money.js all use (one number, one rounding,
+ * no second copy of the arithmetic).
+ */
+function increaseRow() {
   return el(
-    'div.cb-pay',
-    { role: 'group', 'aria-label': 'طريقة الدفع' },
-    ...PAYMENT_METHODS.map((p) =>
-      el(`button.pay-method${getPaymentMethod() === p.id ? '.is-on' : ''}`, {
-        type: 'button',
-        'aria-pressed': getPaymentMethod() === p.id ? 'true' : 'false',
-        text: p.label,
-        onClick: () => { setPaymentMethod(p.id); paintBar(); },
-      })
-    )
+    'div.promo-input.cb-increase',
+    { style: 'flex:1;min-width:0;margin-top:0' },
+    fromHTML(icon('plus')),
+    el('input', {
+      type: 'number',
+      min: '0',
+      inputmode: 'decimal',
+      step: '0.5',
+      'aria-label': 'مبلغ إضافي على الإجمالي',
+      placeholder: 'مبلغ إضافي',
+      value: priceIncrease.value || '',
+      oninput: debounce((e) => {
+        const raw = e.target.value;
+        const v = parseFloat(raw);
+        setPriceIncrease(Number.isFinite(v) && v > 0 ? v : 0);
+        // Same rule as the discount box: a rejected value is shown as rejected
+        // rather than left holding a number the totals do not agree with.
+        if (!Number.isFinite(v) || v < 0) e.target.value = '';
+        paintBar();
+        const inp = panel.querySelector('.cb-increase input');
+        if (inp) {
+          inp.focus({ preventScroll: true });
+          try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch { /* type=number */ }
+        }
+      }, 220),
+    }),
+    el('span', {
+      text: currency,
+      style: 'font-size:11px;color:var(--ink-3);font-weight:700;padding-inline-end:4px',
+    })
   );
+}
+
+/** The small plus under the discount box that unfolds the extra-amount input. */
+function increaseToggle() {
+  const btn = el(
+    'button.cb-inc-toggle',
+    {
+      type: 'button',
+      'aria-expanded': increaseOpen ? 'true' : 'false',
+      'aria-label': 'إضافة مبلغ للبيع',
+      title: 'إضافة مبلغ للبيع',
+      style: [
+        'display:inline-flex;align-items:center;justify-content:center',
+        'flex:none;width:30px;height:30px;padding:0',
+        'border:1.5px dashed var(--brass-line);border-radius:999px',
+        'background:var(--card);color:var(--brass-deep);cursor:pointer',
+      ].join(';'),
+      onClick: () => { increaseOpen = !increaseOpen; paintBar(); },
+    },
+    fromHTML(icon('plus'))
+  );
+  const svg = btn.querySelector('svg');
+  if (svg) { svg.style.width = '16px'; svg.style.height = '16px'; }
+  return btn;
 }
 
 function totals() {
   const sub = subtotal();
   const disc = discountAmount();
+  const inc = Math.max(0, Number(priceIncrease.value) || 0);
   const kids = [
     el('div.cb-tot', {}, el('span', { text: 'المجموع الفرعي' }), el('span', { html: moneyHTML(sub, currency) })),
   ];
   if (disc > 0.004) {
-    kids.push(el('div.cb-tot.cb-tot--off', {}, el('span', { text: `الخصم${discount.type === 'percent' ? ` (${num(discount.value)}%)` : ''}` }), el('span', { html: `−${moneyHTML(disc, currency)}` })));
+    kids.push(el('div.cb-tot.cb-tot--off', {}, el('span', { text: 'الخصم' }), el('span', { html: `−${moneyHTML(disc, currency)}` })));
   }
   kids.push(discountRow());
+  // The extra amount lives beside the discount: one small plus unfolds an
+  // inline input in this same list — never a dialog on top of the basket.
+  kids.push(el('div.cb-inc-row', { style: 'display:flex;align-items:center;gap:8px' }, increaseToggle(), increaseOpen ? increaseRow() : null));
+  // Shown only when it bites, in the same green the receipt prints it with.
+  if (inc > 0.004) {
+    kids.push(el('div.cb-tot.cb-tot--inc', { style: 'color:var(--emerald)' }, el('span', { text: 'إضافة' }), el('span', { html: `+${moneyHTML(inc, currency)}` })));
+  }
   kids.push(el('div.cb-tot.cb-tot--grand', {}, el('span', { text: 'الإجمالي النهائي' }), el('span', { html: moneyHTML(grandTotal(), currency) })));
   return el('div.cb-totals', {}, ...kids);
 }
@@ -274,7 +328,6 @@ function paintPanel() {
 
   panel.appendChild(el('div.cb-lines', {}, ...cart.map(lineRow)));
   panel.appendChild(totals());
-  panel.appendChild(paymentRow());
   // Disabled while a sale is being written, so the button cannot be pressed a
   // second time from a second finger, a second repaint, or an impatient double
   // tap. The guard in checkout.js is the real one; this is what the owner sees.
@@ -382,6 +435,10 @@ function setOpen(next) {
  * back) from a plain edit (leave it as the user left it).
  */
 function onCartChange(reason) {
+  // The basket emptied itself (last line removed, or cleared): the extra amount
+  // belonged to that basket, exactly the way the discount is dropped with the
+  // last line — otherwise a stale figure would quietly ride into the next sale.
+  if (!cart.length && priceIncrease.value) setPriceIncrease(0);
   if (reason === 'added' && cart.length) {
     setOpen(true);
     // fall back to collapsed so the panel is not covering the screen by default
@@ -398,7 +455,11 @@ function onEmpty() {
     cancelLabel: 'رجوع',
     danger: true,
   }).then((ok) => {
-    if (ok) clearCart();
+    if (ok) {
+      clearCart();
+      setPriceIncrease(0);
+      increaseOpen = false;
+    }
   });
 }
 
@@ -410,6 +471,12 @@ function onEmpty() {
 async function onCheckout() {
   if (isCheckingOut()) return;
   const done = await confirmAndCompleteSale();
+  // The written sale charged the extra amount it had, so the next basket starts
+  // from zero — the same rule that empties the discount with the basket.
+  if (done) {
+    setPriceIncrease(0);
+    increaseOpen = false;
+  }
   // Repaint on the way out whichever way it went: on success clearCart() already
   // repainted, on cancel the button must come back looking pressable.
   paintBar();

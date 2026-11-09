@@ -404,19 +404,27 @@ export function pickFile(accept) {
     input.accept = accept;
     input.style.display = 'none';
     document.body.appendChild(input);
+
+    // Settle exactly once. On Android the chooser returns and the page regains
+    // focus BEFORE (or instead of) a `change` event, so a short focus timeout
+    // would throw away a file the owner really picked. Modern WebViews fire
+    // `cancel` when the picker is dismissed, which is the reliable "no choice"
+    // signal; the focus timer stays only as a fallback and waits long enough.
+    let settled = false;
+    const finish = (file) => {
+      if (settled) return;
+      settled = true;
+      if (input.parentNode) input.remove();
+      resolve(file);
+    };
+
     input.addEventListener('change', () => {
-      resolve(input.files && input.files[0] ? input.files[0] : null);
-      input.remove();
+      finish(input.files && input.files[0] ? input.files[0] : null);
     });
-    // cancel path: focus returning without a change event
+    input.addEventListener('cancel', () => finish(null));
     window.addEventListener(
       'focus',
-      () => setTimeout(() => {
-        if (input.parentNode) {
-          resolve(null);
-          input.remove();
-        }
-      }, 500),
+      () => setTimeout(() => finish(null), 1200),
       { once: true }
     );
     input.click();

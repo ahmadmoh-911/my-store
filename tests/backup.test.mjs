@@ -204,7 +204,7 @@ let serialised;
   // The counts block agrees with the arrays, because Settings shows it to a
   // person deciding whether to restore.
   eq('counts are recorded', envelope.counts, {
-    products: 2, sales: 1, purchases: 1, suppliers: 1, supplierInvoices: 0, supplierPayments: 0, stockBatches: 3,
+    products: 2, sales: 1, purchases: 1, suppliers: 1, supplierInvoices: 0, supplierPayments: 0, stockBatches: 3, refunds: 0,
   });
 
   // Business fields survive — a backup of nothing but ids would be useless.
@@ -242,9 +242,9 @@ let serialised;
     if (copy.settings) delete copy.settings.logo;
     return copy;
   };
-  const { products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, settings } = live;
+  const { products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, refunds, settings } = live;
   const expectedData = stripForCompareWithImages({
-    products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, settings,
+    products, sales, purchases, suppliers, supplierInvoices, supplierPayments, stockBatches, refunds, settings,
   });
   const actualData = JSON.parse(JSON.stringify(stripForCompare(envelope.data)));
   // `exportAll` stamps `exportedAt`/`version` at the top level only; the sections

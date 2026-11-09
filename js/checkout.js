@@ -25,14 +25,20 @@ import {
   el, fromHTML, clear, moneyHTML, num, fmtDate, dayKeyOf, downloadText,
 } from './utils.js';
 import { printPage, shareText } from './native.js';
-import { createSale, listProducts, listSales, getSettings, variantStock } from './db.js';
+import { createSale, listProducts, listSales, getSettings, variantStock, getStockBatches } from './db.js';
+import { saleTotals } from './money.js';
+import { planItems } from './lot-pricing.js';
 import { openModal, confirmDialog, celebrate, toast } from './components.js';
+import { needsLotPicker, openLotPicker } from './lot-picker.js';
 import {
-  cart, discount, getPaymentMethod, setPaymentMethod, PAYMENT_METHODS,
+  cart, discount, getPaymentMethod, setPaymentMethod,
   subtotal, discountAmount, grandTotal, totalItems,
-  clearCart, setLastSale, priceIncrease, setPriceIncrease,
+  clearCart, setLastSale, priceIncrease,
 } from './cart-store.js';
 import { getEntitlement, getEntitlementMessage, ENTITLEMENT_STATE } from './entitlement.js';
+import { isInterim } from './build-config.js';
+import { refreshInterimGate } from './interim-activation.js';
+import { navigate } from './router.js';
 
 /**
  * One sale at a time.
@@ -76,7 +82,28 @@ function setBusy(next) {
   }
 }
 
-const paymentLabel = (id) => PAYMENT_METHODS.find((p) => p.id === id)?.label || 'نقداً';
+/**
+ * يفتح ورقة اختيار الدفعة لسطر واحد ويعيد وعدًا:
+ *   { lotId } عند الاختيار، أو null عند الإغلاق بلا اختيار (الافتراضي FIFO).
+ */
+function askLotForLine(line, lots) {
+  return new Promise((resolve) => {
+    let settled = false;
+    openLotPicker({
+      productId: line.productId,
+      name: line.name,
+      size: line.size,
+      color: line.color,
+      qty: line.qty,
+      lots,
+      onPick: (choice) => {
+        settled = true;
+        resolve(choice && choice.mode === 'lot' ? { lotId: choice.lotId } : null);
+      },
+      onClose: () => { if (!settled) resolve(null); },
+    });
+  });
+}
 
 /**
  * Confirm → entitlement check → write → clear → receipt.
@@ -94,20 +121,34 @@ export async function confirmAndCompleteSale() {
   // --- ENTITLEMENT ENFORCEMENT ---
   // This is the single authoritative point where a sale is blocked.
   // The UI may disable buttons, but THIS is the gate that must not be bypassed.
-  const entitlement = await getEntitlement();
-  if (!entitlement.canSell) {
-    const msg = await getEntitlementMessage();
-    toast(msg, 'err', 5000);
-    // Log for debugging
-    console.info('[checkout] Sale blocked by entitlement:', {
-      state: entitlement.state,
-      canSell: entitlement.canSell,
-      licenseStatus: entitlement.license?.status,
-      licenseId: entitlement.license?.licenseId,
-      authGoogleSub: entitlement.authGoogleSub,
-      licenseBoundTo: entitlement.licenseBoundTo,
-    });
-    return false;
+  //
+  // Interim build: there is no licence server, so the licence decision is
+  // replaced by the local date-code gate. It is checked HERE, at the same
+  // authoritative point, so "expired activation" still stops a sale — but it
+  // makes no network request, shows no server error, and never touches data.
+  if (isInterim()) {
+    const gate = refreshInterimGate();
+    if (!gate.active) {
+      toast('انتهت صلاحية التفعيل — أدخل كود تاريخ اليوم', 'err', 5000);
+      navigate('interim');
+      return false;
+    }
+  } else {
+    const entitlement = await getEntitlement();
+    if (!entitlement.canSell) {
+      const msg = await getEntitlementMessage();
+      toast(msg, 'err', 5000);
+      // Log for debugging
+      console.info('[checkout] Sale blocked by entitlement:', {
+        state: entitlement.state,
+        canSell: entitlement.canSell,
+        licenseStatus: entitlement.license?.status,
+        licenseId: entitlement.license?.licenseId,
+        authGoogleSub: entitlement.authGoogleSub,
+        licenseBoundTo: entitlement.licenseBoundTo,
+      });
+      return false;
+    }
   }
   // --------------------------------
 
@@ -116,34 +157,7 @@ export async function confirmAndCompleteSale() {
     const settings = await getSettings();
     const cur = settings.currency;
 
-    /* ---- 1 · ask --------------------------------------------------- */
-    // First, ask if the owner wants to add a price increase
-    const increaseInput = await promptDialog({
-      title: 'إضافة مبلغ للبيع',
-      label: 'مبلغ إضافي (اختياري)',
-      value: String(priceIncrease.value || 0),
-      placeholder: '0',
-      confirmLabel: 'متابعة',
-    });
-    if (increaseInput === null) return false;
-    const increaseValue = Math.max(0, Number(increaseInput) || 0);
-    setPriceIncrease(increaseValue);
-
-    const yes = await confirmDialog({
-      title: 'تأكيد إتمام البيع',
-      message:
-        `${totalItems()} قطعة · ${cart.length} صنف\n` +
-        `المجموع الفرعي: ${num(subtotal())} ${cur}\n` +
-        (discountAmount() > 0 ? `الخصم: −${num(discountAmount())} ${cur}\n` : '') +
-        (priceIncrease.value > 0 ? `إضافة: +${num(priceIncrease.value)} ${cur}\n` : '') +
-        `الإجمالي المستحق: ${num(grandTotal())} ${cur}\n` +
-        `طريقة الدفع: ${paymentLabel(getPaymentMethod())}`,
-      confirmLabel: 'تأكيد البيع',
-      cancelLabel: 'رجوع',
-    });
-    if (!yes) return false;
-
-    /* ---- guard against stock that moved while the basket sat open --- */
+    /* ---- 1 · guard against stock that moved while the basket sat open --- */
     const products = await listProducts();
     const byId = new Map(products.map((p) => [p.id, p]));
     for (const line of cart) {
@@ -155,7 +169,52 @@ export async function confirmAndCompleteSale() {
       }
     }
 
-    /* ---- 2 · write ------------------------------------------------- */
+    /* ---- 2 · اختيار الدفعة -------------------------------------------------
+     * «سعر البيع يتبع الدفعة»: حين يحمل الرف أكثر من سعر بيع واحد نسأل عن
+     * الدفعة المقصودة (إغلاق الورقة بلا اختيار = FIFO). نقرأ دفعات كل سطر مرة
+     * واحدة، ثم نبني «معاينة» بنفس دوال lot-pricing.js التي سيستعملها
+     * db.createSale — فيظهر على شاشة التأكيد نفس الإجمالي الذي ستُخزّنه
+     * الفاتورة، مع تفصيل السطور بسعر كل دفعة.
+     * ---------------------------------------------------------------------- */
+    const lotsByLine = new Map();
+    for (const line of cart) {
+      const lots = await getStockBatches(line.productId, `${line.size || ''}|${line.color || ''}`);
+      lotsByLine.set(line.key, lots);
+      if (line.lotId) continue;
+      if (!needsLotPicker(lots)) continue;
+      const chosen = await askLotForLine(line, lots);
+      if (chosen && chosen.lotId) line.lotId = chosen.lotId;
+    }
+
+    // المعاينة الدقيقة: توسيع كل سطر بحسب أسعار الدفعات التي سيستهلكها.
+    // سطر لا يقع له أي دفعة (منتج/مقاس قديم أو مستورد) يُعاين بسعر المنتج
+    // وتكلفته — نفس ما سيسجّله db.createSale — فلا يسقط الإجمالي المعايَن إلى
+    // تقدير قديم مختلف عمّا ستخزّنه الفاتورة.
+    const planned = planItems(cart, (it) => lotsByLine.get(it.key) || [], {
+      productOf: (it) => byId.get(it.productId),
+    });
+    const quoted = planned
+      ? saleTotals(planned, discount.type, discount.value, priceIncrease.value)
+      : { subtotal: subtotal(), discount: discountAmount(), total: grandTotal() };
+
+    /* ---- 3 · ask --------------------------------------------------- */
+    // «إضافة مبلغ للبيع» صار إدخالًا مدمجًا في لوحة السلة (cart-bar.js) —
+    // لا نافذة مستقلة هنا. القيمة المحفوظة من اللوحة هي المستخدمة، ونفس
+    // الحساب والتقريب في money.js دون تغيير.
+    const yes = await confirmDialog({
+      title: 'تأكيد إتمام البيع',
+      message:
+        `${totalItems()} قطعة · ${(planned || cart).length} سطر\n` +
+        `المجموع الفرعي: ${num(quoted.subtotal)} ${cur}\n` +
+        (quoted.discount > 0 ? `الخصم: −${num(quoted.discount)} ${cur}\n` : '') +
+        (priceIncrease.value > 0 ? `إضافة: +${num(priceIncrease.value)} ${cur}\n` : '') +
+        `الإجمالي المستحق: ${num(quoted.total)} ${cur}\n`,
+      confirmLabel: 'تأكيد البيع',
+      cancelLabel: 'رجوع',
+    });
+    if (!yes) return false;
+
+    /* ---- 4 · write ------------------------------------------------- */
     const sale = await createSale({
       items: cart.map((l) => ({
         productId: l.productId,
@@ -165,6 +224,7 @@ export async function confirmAndCompleteSale() {
         qty: l.qty,
         price: l.price,
         costPrice: l.costPrice,
+        lotId: l.lotId || undefined,
       })),
       discountType: discount.type,
       discountValue: discount.value || 0,
@@ -287,8 +347,7 @@ function receiptEl(sale, settings) {
         { style: 'font-size:16px;font-weight:700;color:var(--ink);padding-top:7px' },
         el('span', { text: 'الإجمالي' }),
         el('span', { html: moneyHTML(sale.total, cur) })
-      ),
-      el('div.totals__row', {}, el('span', { text: 'طريقة الدفع' }), el('span', { text: paymentLabel(sale.paymentMethod) }))
+      )
     ),
     el(
       'div.receipt__foot',
@@ -346,7 +405,6 @@ function receiptText(sale, settings) {
   if (sale.discount > 0) L.push(`الخصم: -${num(sale.discount)} ${cur}`);
   if (sale.priceIncrease > 0) L.push(`إضافة: +${num(sale.priceIncrease)} ${cur}`);
   L.push(`الإجمالي: ${num(sale.total)} ${cur}`);
-  L.push(`الدفع: ${paymentLabel(sale.paymentMethod)}`);
   L.push('--------------------------------');
   L.push(settings.receiptFooter || '');
   return L.join('\n');

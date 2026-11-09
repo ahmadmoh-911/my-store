@@ -13,6 +13,7 @@ import { createDriveService } from './drive-service.js';
 import { createAdminLicenseService } from './admin-service.js';
 import { describeAdminConfiguration } from './admin-authorization.js';
 import { createLicenseServer } from './http.js';
+import { createActivationRequestService } from './activation-requests.js';
 
 /**
  * Builds every service the backend exposes.
@@ -168,11 +169,21 @@ export async function buildApplication(options = {}) {
      log,
    });
 
+   // Activation requests: a small self-contained service on the shared
+   // PostgreSQL pool. Accepts submissions from any customer (no session
+   // required) and lists/updates for admins (session + admin sub required).
+   const activationRequestService = createActivationRequestService({
+     pgClient,
+     clock,
+     log,
+   });
+
    return {
      config,
      licenseService,
      authService,
      adminService,
+     activationRequestService,
      driveService,
      // The repositories are returned alongside the services so a test can mint a
      // real session or read a real grant without this module growing a
@@ -201,10 +212,10 @@ function safeJson(value) {
 
 /** Starts the server when invoked directly. @returns {Promise<void>} */
 async function main() {
-   const { licenseService, authService, adminService, driveService, config, log, close } =
+   const { licenseService, authService, adminService, activationRequestService, driveService, config, log, close } =
      await buildApplication();
 
-   const { listen } = createLicenseServer({ licenseService, authService, adminService, driveService, config, log });
+   const { listen } = createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, config, log });
    const address = await listen();
 
    log(`storehub licence backend listening on http://${address.host}:${address.port}`);

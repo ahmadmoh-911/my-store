@@ -1,0 +1,25 @@
+# Store Hub — Docker ignore
+# Files and directories that must not be copied into the image.
+
+.git/
+.gitignore
+.env
+.env.example
+ENV_VARIABLES.md
+*.md
+*.mdx
+*.apk
+*.aab
+*.keystore
+*.jks
+__pycache__/
+*.pyc
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+coverage/
+.nyc_output/
+.DS_Store
+Thumbs.db

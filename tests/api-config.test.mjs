@@ -106,9 +106,9 @@ async function runTests() {
     eq('drive returns default path when no base', m.resolveClientBase('drive'), '/api/drive');
 
     setWindow({ STOREHUB_API_BASE: 'https://api.example.com' });
-    eq('license returns full origin when base set', m.resolveClientBase('license'), 'https://api.example.com');
-    eq('auth returns full origin when base set', m.resolveClientBase('auth'), 'https://api.example.com');
-    eq('drive returns full origin when base set', m.resolveClientBase('drive'), 'https://api.example.com');
+    eq('license returns origin + group path when base set', m.resolveClientBase('license'), 'https://api.example.com/api/license');
+    eq('auth returns origin + group path when base set', m.resolveClientBase('auth'), 'https://api.example.com/api/auth');
+    eq('drive returns origin + group path when base set', m.resolveClientBase('drive'), 'https://api.example.com/api/drive');
   }
 
   section('7 · setApiBaseForTesting / clearApiBaseForTesting');

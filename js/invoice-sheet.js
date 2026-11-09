@@ -20,14 +20,13 @@ import { icon } from './icons.js';
 import { el, fromHTML, clear, moneyHTML, fmtDate, fmtTime } from './utils.js';
 import { openSheet, confirmDialog, toast } from './components.js';
 import { updateSale, refundSale, getSettings, listProducts } from './db.js';
+import { saleTotals } from './money.js';
 
 const PAYMENTS = [
   { id: 'cash', label: 'نقداً' },
   { id: 'card', label: 'بطاقة' },
   { id: 'transfer', label: 'تحويل' },
 ];
-
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 /** Any number at or above zero. A price typed as "-5" is 0, not minus five. */
 const nonNeg = (v) => {
@@ -36,13 +35,10 @@ const nonNeg = (v) => {
 };
 
 function totalsOf(items, discountType, discountValue, priceIncrease = 0) {
-  const subtotal = items.reduce((t, it) => t + it.qty * it.price, 0);
-  const v = nonNeg(discountValue);
-  const discount = discountType === 'percent'
-    ? round2((subtotal * Math.min(v, 100)) / 100)
-    : Math.min(round2(v), subtotal);
-  const increase = nonNeg(priceIncrease);
-  return { subtotal: round2(subtotal), discount, increase, total: round2(subtotal - discount + increase) };
+  // Exact shared arithmetic (js/money.js) — what the sheet previews is
+  // therefore to the agora what "حفظ" will store, never a cent apart.
+  const t = saleTotals(items, discountType, discountValue, priceIncrease);
+  return { subtotal: t.subtotal, discount: t.discount, increase: t.priceIncrease, total: t.total };
 }
 
 /**
@@ -120,7 +116,11 @@ export function openInvoiceSheet(sale, opts = {}) {
     } else {
       foot.appendChild(
         el('button.btn.btn--ghost', { type: 'button', onClick: onRefund },
-          fromHTML(icon('refresh')), el('span', { text: 'استرجاع' }))
+          fromHTML(icon('refresh')), el('span', { text: 'استرجاع كامل' }))
+      );
+      foot.appendChild(
+        el('button.btn.btn--ghost', { type: 'button', onClick: onPartialRefund },
+          fromHTML(icon('refresh')), el('span', { text: 'استرجاع جزئي' }))
       );
       foot.appendChild(
         el('button.btn.btn--primary', { type: 'button', onClick: () => { editing = true; paint(); } },
@@ -142,6 +142,17 @@ export function openInvoiceSheet(sale, opts = {}) {
   function readOnly(t) {
     const when = new Date(sale.timestamp);
     const payLabel = PAYMENTS.find((p) => p.id === draft.paymentMethod)?.label || draft.paymentMethod;
+
+    // Calculate profit per line if costPrice is available
+    const itemsWithProfit = draft.items.map((it) => {
+      const cost = Number(it.costPrice) || 0;
+      const revenue = it.qty * it.price;
+      const totalCost = it.qty * cost;
+      const profit = revenue - totalCost;
+      return { ...it, cost, revenue, totalCost, profit };
+    });
+
+    const totalProfit = itemsWithProfit.reduce((sum, it) => sum + it.profit, 0);
 
     return el(
       'div',
@@ -169,7 +180,7 @@ export function openInvoiceSheet(sale, opts = {}) {
       el(
         'div.inv-items',
         {},
-        ...draft.items.map((it) =>
+        ...itemsWithProfit.map((it) =>
           el(
             'div.inv-item',
             {},
@@ -191,7 +202,9 @@ export function openInvoiceSheet(sale, opts = {}) {
               {},
               el('div.inv-cell', {}, el('span.inv-cell__k', { text: 'الكمية' }), el('b.inv-cell__v', { text: String(it.qty) })),
               el('div.inv-cell', {}, el('span.inv-cell__k', { text: 'سعر الوحدة' }), el('b.inv-cell__v', { html: moneyHTML(it.price, currency) })),
-              el('div.inv-cell.inv-cell--sum', {}, el('span.inv-cell__k', { text: 'الإجمالي' }), el('b.inv-cell__v', { html: moneyHTML(it.qty * it.price, currency) }))
+              el('div.inv-cell', {}, el('span.inv-cell__k', { text: 'التكلفة' }), el('b.inv-cell__v', { html: moneyHTML(it.cost, currency) })),
+              el('div.inv-cell.inv-cell--sum', {}, el('span.inv-cell__k', { text: 'الإيراد' }), el('b.inv-cell__v', { html: moneyHTML(it.revenue, currency) })),
+              el('div.inv-cell.inv-cell--sum', {}, el('span.inv-cell__k', { text: 'الربح' }), el('b.inv-cell__v', { html: moneyHTML(it.profit, currency), style: it.profit >= 0 ? 'color:var(--emerald)' : 'color:var(--danger)' }))
             )
           )
         )
@@ -208,7 +221,8 @@ export function openInvoiceSheet(sale, opts = {}) {
         t.increase > 0.004
           ? el('div.inv-total', { style: 'color:var(--emerald)' }, el('span', { text: 'إضافة' }), el('span', { html: `+${moneyHTML(t.increase, currency)}` }))
           : null,
-        el('div.inv-total.inv-total--grand', {}, el('span', { text: 'الإجمالي' }), el('span', { html: moneyHTML(t.total, currency) }))
+        el('div.inv-total.inv-total--grand', {}, el('span', { text: 'الإجمالي' }), el('span', { html: moneyHTML(t.total, currency) })),
+        el('div.inv-total.inv-total--grand', { style: 'color:var(--emerald);border-top:2px solid var(--emerald)' }, el('span', { text: 'صافي الربح' }), el('span', { html: moneyHTML(totalProfit, currency) }))
       ),
 
       /* `html`, not `text`: the fixed-amount branch embeds moneyHTML's markup
@@ -273,15 +287,14 @@ export function openInvoiceSheet(sale, opts = {}) {
       el(
         'div.inv-edit-opts',
         {},
+        // الخصم مبلغ ثابت فقط في الفواتير الجديدة (قرار صاحب المتجر). لا مبدّل
+        // نوع هنا. الفاتورة القديمة التي كُتبت بنسبة تبقى نسبةً عند تعديلها
+        // (تُقرأ وتُعدَّل كما كانت)، فالحقل يتبع نوعها المخزَّن: نسبةً لو كانت
+        // كذلك، ومبلغًا فيما عدا ذلك.
         el('div.inv-field', {},
-          el('label.inv-field__label', { text: 'نوع الخصم' }),
-          el('div.seg', {},
-            el('button', { type: 'button', class: draft.discountType === 'fixed' ? 'is-active' : '', text: 'مبلغ', onClick: () => { draft.discountType = 'fixed'; paint(); } }),
-            el('button', { type: 'button', class: draft.discountType === 'percent' ? 'is-active' : '', text: 'نسبة %', onClick: () => { draft.discountType = 'percent'; paint(); } }))),
-        el('div.inv-field', {},
-          el('label.inv-field__label', { text: 'قيمة الخصم' }),
+          el('label.inv-field__label', { text: draft.discountType === 'percent' ? 'نسبة الخصم %' : 'قيمة الخصم' }),
           el('input.input', {
-            type: 'number', step: draft.discountType === 'percent' ? '1' : '0.01', min: '0',
+            type: 'number', step: '0.01', min: '0',
             inputmode: 'decimal', value: String(draft.discountValue),
             onInput: (e) => { draft.discountValue = nonNeg(e.target.value); refreshTotalsOnly(); },
             onBlur: (e) => { e.target.value = String(nonNeg(e.target.value)); },
@@ -308,7 +321,7 @@ export function openInvoiceSheet(sale, opts = {}) {
    * discount: a full repaint would steal focus mid-keystroke.
    */
   function refreshTotalsOnly() {
-    const t = totalsOf(draft.items, draft.discountType, draft.discountValue);
+    const t = totalsOf(draft.items, draft.discountType, draft.discountValue, draft.priceIncrease);
 
     for (const host of body.querySelectorAll('.inv-totals')) {
       clear(host);
@@ -338,21 +351,91 @@ export function openInvoiceSheet(sale, opts = {}) {
   }
 
   async function onRefund() {
+    // Full refund: every line, every piece. The original sale stays intact for
+    // audit; a separate refund record is created.
     const ok = await confirmDialog({
-      title: 'استرجاع الفاتورة',
-      message: 'سيتم حذف الفاتورة وإرجاع الكميات إلى المخزون.',
-      confirmLabel: 'استرجاع',
+      title: 'استرجاع الفاتورة بالكامل',
+      message: 'سيتم تسجيل استرجاع كامل للفاتورة وإرجاع الكميات إلى المخزون. الفاتورة الأصلية تبقى محفوظة للتتبع.',
+      confirmLabel: 'تأكيد الاسترجاع الكامل',
       danger: true,
     });
     if (!ok) return;
     try {
-      await refundSale(sale.id);
+      await refundSale(sale.id, {
+        idempotencyKey: `refund-${sale.id}-full-${Date.now()}`,
+      });
       sheet.close();
-      toast('تم استرجاع الفاتورة', 'ok');
+      toast('تم تسجيل استرجاع الفاتورة بالكامل', 'ok');
       opts.onRefund && opts.onRefund();
     } catch (err) {
       console.error('[invoice] refund failed', err);
       toast('تعذّر الاسترجاع', 'err');
+    }
+  }
+
+  /** Partial refund: choose which lines and quantities to return. */
+  async function onPartialRefund() {
+    const items = draft.items || [];
+    if (items.length === 0) {
+      toast('لا توجد أصناف للاسترجاع', 'warn');
+      return;
+    }
+
+    const host = el('div', { style: 'display:flex;flex-direction:column;gap:12px' });
+    const inputs = items.map((it, idx) => {
+      const row = el('div', { style: 'display:flex;flex-direction:column;gap:6px' }, [
+        el('div', { style: 'display:flex;justify-content:space-between;gap:8px' }, [
+          el('span', { text: `${it.name} (${it.qty} × ${moneyHTML(it.price, 'ILS')})` }),
+          el('span', { text: `المتوفر: ${it.qty}`, style: 'font-size:0.85rem;color:#666' }),
+        ]),
+        el('input', {
+          type: 'number',
+          min: '0',
+          max: String(it.qty),
+          value: String(it.qty),
+          style: 'width:80px;padding:6px;font-size:1rem',
+        }),
+      ]);
+      row.querySelector('input').dataset.idx = String(idx);
+      return row;
+    });
+    host.append(...inputs);
+
+    const confirmed = await confirmDialog({
+      title: 'استرجاع جزئي',
+      message: host,
+      confirmLabel: 'تأكيد الاسترجاع الجزئي',
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    const refundItems = [];
+    let anyRequested = false;
+    for (let i = 0; i < items.length; i++) {
+      const input = host.querySelector(`input[data-idx='${i}']`);
+      const qty = Math.round(Number(input?.value) || 0);
+      if (qty > 0) {
+        refundItems.push({ productId: items[i].productId, size: items[i].size, color: items[i].color, qty });
+        anyRequested = true;
+      }
+    }
+
+    if (!anyRequested) {
+      toast('يجب اختيار كمية واحدة على الأقل', 'warn');
+      return;
+    }
+
+    try {
+      await refundSale(sale.id, {
+        items: refundItems,
+        idempotencyKey: `refund-${sale.id}-partial-${Date.now()}`,
+      });
+      sheet.close();
+      toast('تم تسجيل الاسترجاع الجزئي', 'ok');
+      opts.onRefund && opts.onRefund();
+    } catch (err) {
+      console.error('[invoice] partial refund failed', err);
+      toast('تعذّر الاسترجاع الجزئي', 'err');
     }
   }
 
@@ -363,6 +446,7 @@ export function openInvoiceSheet(sale, opts = {}) {
       discountValue: draft.discountValue,
       paymentMethod: draft.paymentMethod,
       note: draft.note,
+      priceIncrease: draft.priceIncrease,
     };
     try {
       await updateSale(sale.id, payload);

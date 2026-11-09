@@ -2300,3 +2300,72 @@ body.has-cartbar { padding-bottom: calc(var(--bottomnav-h) + var(--safe-b) + 64p
 @media (prefers-reduced-motion: reduce) {
   .restock__pick, .restock__row { transition: none; }
 }
+
+/* ==========================================================================
+   Activate screen — three ordered steps (sign-in → code → bind)
+   ========================================================================== */
+/* `.btn` sets `display: inline-flex`, and an author rule beats the user-agent
+   `[hidden]` rule, so a hidden button would still show without this. Scoped to
+   the screen so nothing else is affected. */
+#activate-screen [hidden] { display: none !important; }
+#activate-screen #act-account {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+/* The hint is a standalone line under the input, not a label-row trailing hint. */
+#activate-screen .field__hint { margin-inline-start: 0; margin-top: 6px; }
+
+/* --- شريط التنقل بين الأيام في لوحة الرئيسية --- */
+.daynav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+}
+.daynav__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.daynav__label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46vw;
+}
+.daynav__today-btn {
+  appearance: none;
+  border: 1px solid var(--primary);
+  background: var(--primary-tint);
+  color: var(--primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 5px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform .08s ease, background .15s ease;
+}
+.daynav__today-btn:active { transform: scale(0.95); }
+/* في يوم اليوم نفسه: الزر معطّل ومميز بأنه الوضع الحالي */
+.daynav__today-btn[disabled] {
+  cursor: default;
+  background: var(--primary);
+  color: var(--on-primary, #fff);
+  border-color: var(--primary);
+  opacity: 0.92;
+  pointer-events: none;
+}
+.daynav__arrow { flex: 0 0 auto; }

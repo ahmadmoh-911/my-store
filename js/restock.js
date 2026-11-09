@@ -16,8 +16,7 @@ import { icon } from './icons.js';
 import { el, fromHTML, clear, numInt, moneyHTML, isoDate, sum } from './utils.js';
 import { openSheet, emptyState, toast, celebrate } from './components.js';
 import {
-  listSuppliers, saveSupplier, createPurchase, listProducts, stockOf,
-  addStockBatch,
+  listSuppliers, saveSupplier, restockProduct, listProducts, stockOf,
 } from './db.js';
 
 /** The rows the sheet edits: one per existing variant, or a single blank one. */
@@ -29,17 +28,30 @@ function variantRows(product) {
       color: v.color || '',
       current: Number(v.quantity) || 0,
       qty: 0,
+      isNew: false,
     }));
   }
   // A product saved without a size/colour grid still needs somewhere to put the
   // new quantity — one nameless variant is the honest representation.
-  return [{ size: '', color: '', current: 0, qty: 0 }];
+  return [{ size: '', color: '', current: 0, qty: 0, isNew: false }];
 }
 
 const label = (size, color) =>
   [size || 'مقاس واحد', color || 'بدون لون'].filter(Boolean).join(' · ');
 
 const money = (n) => moneyHTML(n, 'ILS');
+
+/** Available sizes/colors from settings + product's existing variants for dropdown. */
+async function getSizeColorOptions(product) {
+  const { listSettings } = await import('./db.js');
+  const settings = await listSettings();
+  const existingSizes = (product.variants || []).map((v) => v.size).filter(Boolean);
+  const existingColors = (product.variants || []).map((v) => v.color).filter(Boolean);
+  return {
+    sizes: [...new Set([...(settings.sizes || []), ...existingSizes])].filter(Boolean),
+    colors: [...new Set([...(settings.colors || []).map((c) => c.name), ...existingColors])].filter(Boolean),
+  };
+}
 
 /**
  * Opens the restock sheet for one product.
@@ -68,10 +80,40 @@ export function openRestockSheet(product, { onDone } = {}) {
   /* --- body --------------------------------------------------------- */
 
   const variantHost = el('div.restock__variants');
+  let sizeColorOptions = { sizes: [], colors: [] };
+  async function loadSizeColorOptions() {
+    sizeColorOptions = await getSizeColorOptions(product);
+    paintVariants();
+  }
+  loadSizeColorOptions();
+
+  // Initial paint with empty options (will repaint when loaded)
+  paintVariants();
+
   function paintVariants() {
     clear(variantHost);
     rows.forEach((r, i) => {
-      const input = el('input.input.qty-input', {
+      const sizeSelect = el('select.select.size-select', {
+        'aria-label': 'المقاس',
+        onchange: (e) => {
+          rows[i].size = e.target.value;
+          paintVariants();
+        },
+      });
+      sizeSelect.appendChild(el('option', { value: '', text: '—', selected: r.size === '' }));
+      sizeColorOptions.sizes.forEach((s) => sizeSelect.appendChild(el('option', { value: s, text: s, selected: r.size === s })));
+
+      const colorSelect = el('select.select.color-select', {
+        'aria-label': 'اللون',
+        onchange: (e) => {
+          rows[i].color = e.target.value;
+          paintVariants();
+        },
+      });
+      colorSelect.appendChild(el('option', { value: '', text: '—', selected: r.color === '' }));
+      sizeColorOptions.colors.forEach((c) => colorSelect.appendChild(el('option', { value: c, text: c, selected: r.color === c })));
+
+      const qtyInput = el('input.input.qty-input', {
         type: 'number',
         min: '0',
         step: '1',
@@ -85,6 +127,11 @@ export function openRestockSheet(product, { onDone } = {}) {
           paintTotal();
         },
       });
+
+      const removeBtn = rows.length > 1
+        ? el('button.icon-btn', { type: 'button', 'aria-label': 'حذف هذا السطر', onClick: () => { rows.splice(i, 1); paintVariants(); } }, fromHTML(icon('x')))
+        : null;
+
       variantHost.appendChild(
         el(
           'div.restock__row',
@@ -95,16 +142,28 @@ export function openRestockSheet(product, { onDone } = {}) {
             el(
               'div.restock__rowname',
               {},
-              r.size ? el('span.size-pill', { style: 'height:21px;min-width:auto;font-size:10.5px', text: r.size }) : null,
-              r.color ? el('span', { text: r.color }) : null,
-              !r.size && !r.color ? el('span', { text: 'بدون مقاس أو لون' }) : null
+              sizeSelect,
+              colorSelect,
+              removeBtn,
+              !r.size && !r.color && !r.isNew ? el('span', { text: 'بدون مقاس أو لون' }) : null
             ),
             el('div.restock__rowmeta', { text: `المتاح حالياً: ${r.current}` })
           ),
-          input
+          qtyInput
         )
       );
     });
+
+    // Add new variant button
+    variantHost.appendChild(
+      el('button.btn.btn--sm.btn--soft.btn--icon', {
+        type: 'button',
+        onClick: async () => {
+          rows.push({ size: '', color: '', current: 0, qty: 0, isNew: true });
+          paintVariants();
+        }
+      }, fromHTML(icon('plus')), el('span', { text: 'إضافة مقاس/لون جديد' }))
+    );
   }
 
   /* --- supplier ------------------------------------------------------ */
@@ -351,21 +410,11 @@ export function openRestockSheet(product, { onDone } = {}) {
         supplierName = suppliers.find((s) => s.id === supplierId)?.name || '';
       }
 
-      // Add stock batches with explicit purchase and selling prices
-      for (const line of lines) {
-        const variantKey = `${line.size || ''}|${line.color || ''}`;
-        await addStockBatch({
-          productId: product.id,
-          variantKey,
-          size: line.size,
-          color: line.color,
-          quantity: line.qty,
-          costPrice: state.unitCost,
-          sellingPrice: state.newPrice === '' ? null : state.newPrice,
-        });
-      }
-
-      const { record } = await createPurchase({
+      // Stock lots, product variants and the purchase row are written together
+      // in ONE transaction (restockProduct), so a restock is all-or-nothing:
+      // the shelf can never rise without the store balance following, or the
+      // other way round.
+      const { record } = await restockProduct({
         productId: product.id,
         productName: product.name,
         supplierId,

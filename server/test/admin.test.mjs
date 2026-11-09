@@ -955,8 +955,27 @@ test('SEPARATION: the service worker does not precache the admin portal', () => 
   // The portal is a separate deployment. Precaching it from the customer's
   // service worker would put admin assets inside the shop's offline cache — on
   // every customer's device.
-  assert.ok(!sw.includes('admin/'), 'the service worker precaches admin assets');
-  assert.ok(!sw.includes('admin.html'), 'the service worker precaches an admin document');
+  //
+  // Check what the worker will actually store: the entries of PRECACHE, read
+  // out of the array, rather than grepping the file for the substring "admin".
+  // A comment, a log line, or a routing branch can mention "admin" without any
+  // admin byte ever reaching a customer's cache, and a substring test cannot
+  // tell those apart from a real precache entry.
+  const arrayMatch = sw.match(/const PRECACHE\s*=\s*\[([\s\S]*?)\];/);
+  assert.ok(arrayMatch, 'could not locate the PRECACHE array in sw.js');
+
+  // Only `./…` strings: the array carries comments, and one of them contains an
+  // apostrophe ("main.js's ..."), which a looser quote match would split on.
+  const entries = [...arrayMatch[1].matchAll(/'(\.[^']*)'/g)].map((m) => m[1]);
+  assert.ok(entries.length > 0, 'PRECACHE parsed to no entries');
+
+  for (const entry of entries) {
+    const normalised = entry.replace(/^\.\//, '').toLowerCase();
+    assert.ok(
+      !/(^|\/)admin(\/|\.html|$)/.test(normalised),
+      `the service worker precaches an admin asset: ${entry}`,
+    );
+  }
 });
 
 /* ==================================================================== *

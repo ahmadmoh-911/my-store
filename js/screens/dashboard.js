@@ -120,38 +120,47 @@ async function boot(root) {
   drawTrend(root, sales, cur);
 }
 
-/* --- day navigator -------------------------------------------------- */
+/* --- day navigator -------------------------------------------------- *
+ * وحدة صغيرة بإطار تحت «مرحبًا متجري»: سهم السابق | زر «اليوم» في المنتصف |
+ * سهم التالي. بترتيب RTL: السابق أول عنصر (يظهر يمينًا) والتالي آخره
+ * (يظهر يسارًا)، وزر «اليوم» دائمًا ظاهر — معطّل ومميز حين نكون فيه فعلًا.
+ * ------------------------------------------------------------------- */
 function renderDayNav(root) {
   const host = root.querySelector('#dash-daynav');
   clear(host);
 
-  const day = isToday(viewDate) ? 'اليوم' : fmtDate(viewDate);
+  const today = isToday(viewDate);
+  const label = today
+    ? new Date().toLocaleDateString('ar-EG', { weekday: 'long' })
+    : `${fmtDate(viewDate)} · ${fmtDayName(viewDate)}`;
 
   host.appendChild(
     el(
       'div.daynav',
       {},
-      el('button.icon-btn', {
-        type: 'button',
-        'aria-label': 'اليوم التالي',
-        disabled: isToday(viewDate) ? '' : null,
-        onClick: () => setDay(1),
-      }, fromHTML(icon('chevronLeft'))),
-      el(
-        'div.daynav__label',
-        {},
-        fromHTML(icon('calendar')),
-        el('span.daynav__day', { text: day }),
-        el('span.daynav__sub', { text: isToday(viewDate) ? new Date().toLocaleDateString('ar-EG', { weekday: 'long' }) : fmtDayName(viewDate) })
-      ),
-      isToday(viewDate)
-        ? el('span.daynav__today', { text: 'اليوم' })
-        : el('button.pill-btn.pill-btn--sm', { type: 'button', text: 'العودة لليوم', onClick: () => setDay(0, true) }),
-      el('button.icon-btn', {
+      el('button.icon-btn.daynav__arrow', {
         type: 'button',
         'aria-label': 'اليوم السابق',
         onClick: () => setDay(-1),
-      }, fromHTML(icon('chevronRight')))
+      }, fromHTML(icon('chevronRight'))),
+      el(
+        'div.daynav__center',
+        {},
+        el('span.daynav__label', { text: label }),
+        el('button.daynav__today-btn', {
+          type: 'button',
+          text: 'اليوم',
+          disabled: today ? '' : null,
+          'aria-current': today ? 'date' : null,
+          onClick: () => setDay(0, true),
+        })
+      ),
+      el('button.icon-btn.daynav__arrow', {
+        type: 'button',
+        'aria-label': 'اليوم التالي',
+        disabled: today ? '' : null,
+        onClick: () => setDay(1),
+      }, fromHTML(icon('chevronLeft')))
     )
   );
 }

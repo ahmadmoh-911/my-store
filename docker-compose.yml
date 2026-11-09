@@ -1,0 +1,38 @@
+# Store Hub — Local staging / development deployment
+#
+# Usage:
+#   cp .env.example .env   # then edit .env with real values
+#   docker compose up -d
+#
+# Services:
+#   storehub-backend — the Node licence/auth/admin/Drive backend
+#
+# Notes:
+#   - SUPABASE_DB_URL must point to a reachable PostgreSQL (Supabase or self-hosted).
+#   - STOREHUB_PEPPER must be set (32+ hex chars) for licence code hashing.
+#   - STOREHUB_ADMIN_SUB must list at least one Google sub for admin access.
+#   - Google OAuth redirect URIs must be registered in Google Cloud Console.
+
+version: "3.8"
+
+services:
+  storehub-backend:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=8787
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8787/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # No secrets are stored in this file. Provide them via .env (not committed).

@@ -106,19 +106,20 @@ async function postLicense(endpoint, body, options = {}) {
 export async function activateLicense(licenseCode, options = {}) {
   const result = await postLicense('activate', { licenseCode }, options);
 
-  if (result.ok && result.license && result.sessionToken) {
+  if (result.ok && result.license) {
     // Cache entitlement + session + account linkage + server time + trusted verification timestamp.
     const nowIso = new Date().toISOString();
-    await import('./identity-store.js').then((mod) => {
-      return mod.saveLicenseRecord({
-        licenseId: result.license.id,
-        status: result.license.status,
-        expiresAt: result.license.expiresAt,
-        lastVerifiedAt: nowIso,
-        lastServerTime: result.serverTime,
-        lastTrustedVerificationAt: nowIso,
-        linkedAccountId: result.linkedAccountId ?? null,
-      });
+    const { getLicenseRecord, saveLicenseRecord } = await import('./identity-store.js');
+    const cached = await getLicenseRecord();
+    await saveLicenseRecord({
+      licenseId: result.license.id,
+      status: result.license.status,
+      expiresAt: result.license.expiresAt,
+      lastVerifiedAt: nowIso,
+      lastServerTime: result.serverTime,
+      lastTrustedVerificationAt: nowIso,
+      linkedAccountId: result.linkedAccountId ?? cached?.linkedAccountId ?? null,
+      sessionToken: result.sessionToken ?? cached?.sessionToken ?? null,
     });
   }
 
