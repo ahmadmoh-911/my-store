@@ -17,7 +17,7 @@
  * per line, and the money in one block at the bottom.
  */
 import { icon } from './icons.js';
-import { el, fromHTML, clear, moneyHTML, fmtDate, fmtTime } from './utils.js';
+import { el, fromHTML, clear, money, moneyHTML, fmtDate, fmtTime } from './utils.js';
 import { openSheet, confirmDialog, toast } from './components.js';
 import { updateSale, refundSale, getSettings, listProducts } from './db.js';
 import { saleTotals } from './money.js';
@@ -385,15 +385,20 @@ export function openInvoiceSheet(sale, opts = {}) {
     const inputs = items.map((it, idx) => {
       const row = el('div', { style: 'display:flex;flex-direction:column;gap:6px' }, [
         el('div', { style: 'display:flex;justify-content:space-between;gap:8px' }, [
-          el('span', { text: `${it.name} (${it.qty} × ${moneyHTML(it.price, 'ILS')})` }),
-          el('span', { text: `المتوفر: ${it.qty}`, style: 'font-size:0.85rem;color:#666' }),
+          // Text, not markup: moneyHTML() returns HTML and was shown to the
+          // cashier as `120<span class="cur">ILS</span>`. The sale's own
+          // currency, not a hard-coded ILS.
+          el('span', { text: `${it.name} (${it.qty} × ${money(it.price, currency)})` }),
+          el('span.tiny.muted', { text: `المتوفر: ${it.qty}` }),
         ]),
-        el('input', {
+        el('input.input', {
           type: 'number',
+          inputmode: 'numeric',
           min: '0',
           max: String(it.qty),
           value: String(it.qty),
-          style: 'width:80px;padding:6px;font-size:1rem',
+          style: 'width:96px',
+          'aria-label': `كمية الاسترجاع — ${it.name}`,
         }),
       ]);
       row.querySelector('input').dataset.idx = String(idx);
@@ -414,6 +419,11 @@ export function openInvoiceSheet(sale, opts = {}) {
     for (let i = 0; i < items.length; i++) {
       const input = host.querySelector(`input[data-idx='${i}']`);
       const qty = Math.round(Number(input?.value) || 0);
+      const sold = Number(items[i].qty) || 0;
+      if (qty < 0 || qty > sold) {
+        toast(`كمية «${items[i].name}» لازم تكون بين 0 و ${sold}`, 'warn');
+        return;
+      }
       if (qty > 0) {
         refundItems.push({ productId: items[i].productId, size: items[i].size, color: items[i].color, qty });
         anyRequested = true;
@@ -435,7 +445,9 @@ export function openInvoiceSheet(sale, opts = {}) {
       opts.onRefund && opts.onRefund();
     } catch (err) {
       console.error('[invoice] partial refund failed', err);
-      toast('تعذّر الاسترجاع الجزئي', 'err');
+      // The database explains what was wrong (quantity over what was sold, a
+      // line no longer on the invoice); say it instead of a bare failure.
+      toast(err && err.message ? `تعذّر الاسترجاع الجزئي: ${err.message}` : 'تعذّر الاسترجاع الجزئي', 'err');
     }
   }
 

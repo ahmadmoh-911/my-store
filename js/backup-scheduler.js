@@ -37,7 +37,7 @@ import { ensureBackupFolder, publishLatestBackup, fetchLatestBackup } from './dr
 import { saveBackupRecord } from './identity-store.js';
 
 /** One week, in milliseconds. The interval the phase brief specifies. */
-export const BACKUP_INTERVAL_DAYS = 7;
+export const BACKUP_INTERVAL_DAYS = 1;
 export const BACKUP_INTERVAL_MS = BACKUP_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
 
 /**

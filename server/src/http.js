@@ -574,19 +574,67 @@ async function resolveStaticFile(urlPath, webRoot) {
   }
 }
 
+const REVALIDATE_EXTS = new Set(['.html', '.htm', '.js', '.mjs', '.css', '.json', '.webmanifest']);
+
+/**
+ * Content-Security-Policy for the pages this server ships. Every script is a
+ * same-origin file (no inline <script>, no eval), so script-src is 'self'.
+ * Inline style attributes are used throughout the UI, hence style-src
+ * 'unsafe-inline'. connect-src allows the Drive REST endpoints the backup
+ * client calls directly. frame-ancestors 'none' stops the admin portal (and the
+ * shop) being framed by another site to trick a click.
+ */
+const PAGE_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https://*.googleusercontent.com",
+  "font-src 'self' data:",
+  "connect-src 'self' https://www.googleapis.com https://content.googleapis.com",
+  "media-src 'self' blob:",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+/**
+ * Security headers for a static file. nosniff on everything; the page-level
+ * policy headers only on HTML, where they take effect. HSTS only when the
+ * deployment is served over https (production behind Render's TLS).
+ *
+ * @param {string} ext lower-case extension with the dot
+ * @param {{env?: string}} cfg
+ */
+export function staticSecurityHeaders(ext, cfg) {
+  const headers = { 'x-content-type-options': 'nosniff' };
+  if (ext === '.html' || ext === '.htm') {
+    headers['content-security-policy'] = PAGE_CSP;
+    headers['x-frame-options'] = 'DENY';
+    headers['referrer-policy'] = 'strict-origin-when-cross-origin';
+    headers['permissions-policy'] = 'camera=(self), microphone=(), geolocation=()';
+    if (cfg && cfg.env === 'production') {
+      headers['strict-transport-security'] = 'max-age=31536000; includeSubDomains';
+    }
+  }
+  return headers;
+}
+
 async function tryServeStatic(req, res, urlPath, cfg, cors, now) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
   const found = await resolveStaticFile(urlPath, cfg.webRoot);
   if (!found) return false;
   const { target, stats } = found;
   const mime = getMimeType(path.extname(target));
-  const headers = { 'content-type': mime, ...cors };
-  const base = path.basename(target);
-  if (base === 'sw.js' || base === 'index.html') {
-    headers['cache-control'] = 'no-cache';
-  } else {
-    headers['cache-control'] = 'public, max-age=3600';
-  }
+  const ext = path.extname(target).toLowerCase();
+  const headers = { 'content-type': mime, ...cors, ...staticSecurityHeaders(ext, cfg) };
+  // Code and markup must be re-checked on every load: with a one-hour cache a
+  // redeploy left the admin portal (which the service worker does not handle)
+  // and the worker's own network fetches on the previous build for up to an
+  // hour. Fonts, icons and the vendored libraries change only with a release.
+  headers['cache-control'] = REVALIDATE_EXTS.has(ext) ? 'no-cache' : 'public, max-age=86400';
   if (req.method === 'HEAD') {
     res.writeHead(200, { ...headers, 'content-length': stats.size });
     res.end();
@@ -815,8 +863,30 @@ export function createRequestHandler(deps) {
     try {
       // Health / readiness — no auth, no secrets, no rate limiting.
       if (route.handler === 'health') {
+        // The keep-alive pings this every 10 minutes. It must touch the
+        // database: a health check that only proves the process is up let the
+        // free Supabase project pause (no queries for a week) while this kept
+        // answering ok. A failed probe answers 503 so the ping job fails loudly.
+        let db = 'not-checked';
+        if (typeof deps.checkDatabase === 'function') {
+          try {
+            await deps.checkDatabase();
+            db = 'ok';
+          } catch (err) {
+            log('health: database probe failed', { message: err && err.message });
+            send(res, 503, {
+              ok: false,
+              db: 'down',
+              service: 'storehub-license-backend',
+              env: config.env,
+              serverTime: now,
+            }, cors);
+            return;
+          }
+        }
         send(res, 200, {
           ok: true,
+          db,
           service: 'storehub-license-backend',
           env: config.env,
           serverTime: now,
@@ -1329,8 +1399,8 @@ export function createRequestHandler(deps) {
  * @param {{licenseService: object, authService: object, adminService: object, activationRequestService?: object, config: object, log?: Function}} deps
  * @returns {{server: import('node:http').Server, listen: (port?: number, host?: string) => Promise<{port: number, host: string}>}}
  */
-export function createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, config, log = () => {} }) {
-  const handle = createRequestHandler({ licenseService, authService, adminService, activationRequestService, driveService, config, log });
+export function createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, checkDatabase, config, log = () => {} }) {
+  const handle = createRequestHandler({ licenseService, authService, adminService, activationRequestService, driveService, checkDatabase, config, log });
   const server = createHttpServer((req, res) => {
     // A handler that throws asynchronously would otherwise take the process
     // down; handle() already converts errors to responses.

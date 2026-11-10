@@ -78,6 +78,35 @@ function upcACheck(d) {
 }
 
 /** Picks the rear camera — `facingMode` is unreliable inside an Android WebView. */
+/**
+ * Loads the html5-qrcode fallback the first time the camera scanner opens.
+ *
+ * It used to be a blocking <script> in index.html, so every launch downloaded
+ * and parsed ~375 KB that most sessions never use — painful on a weak
+ * connection. The file is still precached by the service worker, so offline
+ * scanning works exactly as before; only the moment it loads has moved.
+ *
+ * @returns {Promise<void>} resolves once window.Html5Qrcode exists
+ */
+let html5QrcodeLoading = null;
+function ensureHtml5Qrcode() {
+  if (window.Html5Qrcode) return Promise.resolve();
+  if (!html5QrcodeLoading) {
+    html5QrcodeLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'vendor/html5-qrcode.min.js';
+      s.async = true;
+      s.onload = () => (window.Html5Qrcode ? resolve() : reject(new Error('html5-qrcode unavailable')));
+      s.onerror = () => {
+        html5QrcodeLoading = null; // allow a retry once the network is back
+        reject(new Error('html5-qrcode unavailable'));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return html5QrcodeLoading;
+}
+
 async function pickCamera() {
   const cameras = await window.Html5Qrcode.getCameras();
   if (!cameras || !cameras.length) return null;
@@ -166,7 +195,7 @@ function scanWeb() {
 
     (async () => {
       try {
-        if (!window.Html5Qrcode) throw new Error('html5-qrcode unavailable');
+        await ensureHtml5Qrcode();
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           throw new Error('getUserMedia unavailable');
         }
