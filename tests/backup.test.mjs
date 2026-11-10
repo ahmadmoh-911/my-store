@@ -691,19 +691,21 @@ section('6 · the backup runs at most weekly, and only when everything allows it
 
   const plan = (overrides) => scheduler.planBackup({ ...allYes, ...overrides });
 
-  eq('the interval is a week', scheduler.BACKUP_INTERVAL_DAYS, 7);
+  // Daily since the 2026-11-10 audit: a week of unbacked-up sales was too much
+  // to lose with a phone.
+  eq('the interval is a day', scheduler.BACKUP_INTERVAL_DAYS, 1);
 
   ok('never backed up → due immediately', plan({ record: null }).shouldRun === true);
   ok('no record at all → due', plan({ record: undefined }).shouldRun === true);
 
-  const sixDays = { lastSuccessAt: new Date(T0 - 6 * DAY).toISOString() };
-  eq('six days after a success → not due', plan({ record: sixDays }).reason, scheduler.SKIP.NOT_DUE);
+  const sixDays = { lastSuccessAt: new Date(T0 - 20 * 60 * 60 * 1000).toISOString() }; // 20 h: not yet due
+  eq('twenty hours after a success → not due', plan({ record: sixDays }).reason, scheduler.SKIP.NOT_DUE);
 
-  const exactlySeven = { lastSuccessAt: new Date(T0 - 7 * DAY).toISOString() };
-  ok('exactly seven days → due', plan({ record: exactlySeven }).shouldRun === true);
+  const exactlySeven = { lastSuccessAt: new Date(T0 - 1 * DAY).toISOString() };
+  ok('exactly one day → due', plan({ record: exactlySeven }).shouldRun === true);
 
-  const eightDays = { lastSuccessAt: new Date(T0 - 8 * DAY).toISOString() };
-  ok('eight days → due', plan({ record: eightDays }).shouldRun === true);
+  const eightDays = { lastSuccessAt: new Date(T0 - 2 * DAY).toISOString() };
+  ok('two days → due', plan({ record: eightDays }).shouldRun === true);
 
   // Every gate, one at a time. Each must be silent — a shop that is offline
   // must not see a complaint.
@@ -716,7 +718,7 @@ section('6 · the backup runs at most weekly, and only when everything allows it
 
   // A manual run overrides the week, but every other gate still applies — a shop
   // that is offline cannot back up just because someone tapped the button.
-  ok('a forced run is allowed before the week is up', plan({ record: sixDays, forced: true }).shouldRun === true);
+  ok('a forced run is allowed before the day is up', plan({ record: sixDays, forced: true }).shouldRun === true);
   eq('offline is still offline, forced or not',
     plan({ record: sixDays, forced: true, online: false }).reason, scheduler.SKIP.OFFLINE);
   eq('and Drive still has to be connected',

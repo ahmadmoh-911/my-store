@@ -14,6 +14,7 @@ import { emptyState, openSheet, toast, saleRow } from '../components.js';
 import { openInvoiceSheet } from '../invoice-sheet.js';
 import { openRestockPicker } from '../restock.js';
 import { navigate } from '../router.js';
+import { isInterim } from '../build-config.js';
 
 let trendWindow = 7; // days shown in the trend chart (7 / 30, or 1 for today)
 
@@ -88,6 +89,7 @@ export function render() {
     el('div.card', { id: 'dash-invoices', style: 'margin-top:16px' })
   );
 
+  root.appendChild(el('div', { id: 'dash-backup-nag' }));
   root.appendChild(el('div', { id: 'dash-hero', class: 'hero skeleton', style: 'height:150px' }));
   root.appendChild(el('div', { id: 'dash-daynav' }));
   root.appendChild(statsHost);
@@ -95,7 +97,73 @@ export function render() {
   root.appendChild(body);
 
   boot(root);
+  paintBackupNag(root);
   return root;
+}
+
+/**
+ * Shop data lives only in this device's browser storage until Google Drive is
+ * connected; the weekly backup cannot run before that. The 2026-11-10 audit
+ * found every active licence with no Drive connection, so the dashboard says
+ * so on every visit until it is fixed. Silent when it cannot tell (offline,
+ * interim build, not licensed, server says Drive is not configured).
+ */
+async function paintBackupNag(root) {
+  if (isInterim()) return;
+  try {
+    const [{ getEntitlement }, { getDriveStatus }] = await Promise.all([
+      import('../entitlement.js'),
+      import('../drive-auth-client.js'),
+    ]);
+    const ent = await getEntitlement();
+    if (!ent || !ent.canSell) return;
+    const drive = await getDriveStatus();
+    if (!drive || drive.connected || drive.configured === false || drive.unknown) return;
+    const host = root.querySelector('#dash-backup-nag');
+    if (!host || !root.isConnected) return;
+    clear(host);
+    host.appendChild(
+      el(
+        'div.card',
+        {
+          role: 'alert',
+          style:
+            'display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px;' +
+            'border:1px solid var(--warning);background:var(--warning-tint)',
+        },
+        fromHTML(icon('alert')),
+        el(
+          'div',
+          { style: 'flex:1;min-width:200px' },
+          el('b', { text: 'بياناتك محفوظة على هذا الجهاز فقط' }),
+          el('div.tiny.muted', {
+            text: 'إذا ضاع الجهاز أو انمسح المتصفح بتضيع المبيعات والمخزون. اربط Google Drive وبتنحفظ نسخة تلقائياً.',
+          })
+        ),
+        el('button.btn.btn--primary', {
+          type: 'button',
+          text: 'اربط Google Drive',
+          onClick: () => openDriveSettings(),
+        })
+      )
+    );
+  } catch {
+    /* offline or server unreachable: say nothing rather than guess */
+  }
+}
+
+function openDriveSettings() {
+  navigate('settings');
+  const started = Date.now();
+  const seek = () => {
+    const target = document.getElementById('settings-drive');
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    if (Date.now() - started < 3000) requestAnimationFrame(seek);
+  };
+  requestAnimationFrame(seek);
 }
 
 /* ------------------------------------------------------------------ *

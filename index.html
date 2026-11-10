@@ -2,6 +2,8 @@
 <html lang="ar" dir="rtl">
 <head>
   <meta charset="utf-8" />
+  <!-- Old GitHub Pages link → live server (no-op everywhere else). -->
+  <script src="js/legacy-host.js"></script>
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1, viewport-fit=cover"
@@ -74,8 +76,7 @@
   <div class="fly-layer" id="fly-layer" aria-hidden="true"></div>
   <div class="print-root" id="print-root" aria-hidden="true"></div>
 
-  <!-- Fallback camera driver for phones where the system drawer lacks BarcodeDetector -->
-  <script src="vendor/html5-qrcode.min.js"></script>
+  <!-- The html5-qrcode camera fallback is loaded on demand by js/scanner.js -->
 
   <noscript>
     <div style="padding:24px;font-family:sans-serif;text-align:center">

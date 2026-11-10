@@ -294,7 +294,7 @@ async function boot(host) {
           style: 'margin-bottom:12px',
           text:
             `تُحفظ نسخة كاملة واحدة في مجلد "${BACKUP_FOLDER_NAME}" داخل حسابك في Google Drive، ` +
-            `ويتم استبدالها مرة كل ${BACKUP_INTERVAL_DAYS} أيام بعد نجاح النسخ السابق فقط. ` +
+            `ويتم استبدالها ${BACKUP_INTERVAL_DAYS === 1 ? 'مرة كل يوم' : `مرة كل ${BACKUP_INTERVAL_DAYS} أيام`} بعد نجاح النسخ السابق فقط. ` +
             'هذا نسخ احتياطي وليس مزامنة: البيانات تبقى على هذا الجهاز، ولا يغادره شيء سوى ملف النسخة.',
         }),
         driveActions,

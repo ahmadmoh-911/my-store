@@ -193,6 +193,9 @@ export async function buildApplication(options = {}) {
      authRepository: authDb.repo,
      driveRepository: driveDb.repo,
      licenseRepository,
+     // Probed by GET /api/health. Null without PostgreSQL (tests), in which
+     // case health reports db 'not-checked' rather than pretending.
+     checkDatabase: pgClient ? () => pgClient.query('SELECT 1') : null,
      log,
      close: () => {
        driveDb.repo.close();
@@ -214,10 +217,10 @@ function safeJson(value) {
 
 /** Starts the server when invoked directly. @returns {Promise<void>} */
 async function main() {
-   const { licenseService, authService, adminService, activationRequestService, driveService, config, log, close } =
+   const { licenseService, authService, adminService, activationRequestService, driveService, authRepository, checkDatabase, config, log, close } =
      await buildApplication();
 
-   const { listen } = createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, config, log });
+   const { listen } = createLicenseServer({ licenseService, authService, adminService, activationRequestService, driveService, checkDatabase, config, log });
    const address = await listen();
 
    log(`storehub licence backend listening on http://${address.host}:${address.port}`);
@@ -234,8 +237,24 @@ async function main() {
      }
    }
 
+   // Expired sessions are refused on read but were never deleted, so the
+   // table only ever grew. Sweep once at boot and then hourly; unref() so the
+   // timer never keeps a shutting-down process alive.
+   const sweepSessions = () => {
+     try {
+       const removed = authRepository.cleanupExpiredSessions();
+       if (removed) log(`removed ${removed} expired session(s)`);
+     } catch (err) {
+       log('session cleanup failed', { message: err && err.message });
+     }
+   };
+   sweepSessions();
+   const sweepTimer = setInterval(sweepSessions, 60 * 60 * 1000);
+   sweepTimer.unref();
+
    const shutdown = (signal) => {
      log(`${signal} received, closing`);
+     clearInterval(sweepTimer);
      close();
      process.exit(0);
    };

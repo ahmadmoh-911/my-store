@@ -281,7 +281,7 @@ async function httpLayerChecks() {
     ok(`http: server listening on 127.0.0.1:${address.port} (PostgreSQL mode)`);
 
     // -- routes that do not exist in the contract ---------------------------
-    // These four paths appear only in PHASE_2_AUDIT_REPORT.md's inventory; the
+    // These four paths appear only in docs/archive/PHASE_2_AUDIT_REPORT.md's inventory; the
     // route table in http.js has never carried them. Asserted as 404 so the
     // gap is evidence, not an assumption.
     for (const [method, path] of [
