@@ -126,3 +126,23 @@ test('SESSIONS: cleanupExpiredSessions deletes expired rows and keeps live ones'
     repo.close();
   }
 });
+
+test('LEGAL PAGES: privacy and terms are public pages with the page headers', async () => {
+  const app = await serve();
+  try {
+    for (const p of ['/privacy.html', '/terms.html']) {
+      const res = await fetch(app.base + p);
+      assert.equal(res.status, 200, p);
+      assert.match(res.headers.get('content-type') || '', /text\/html/);
+      assert.match(res.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+      const html = await res.text();
+      assert.match(html, /<html lang="ar" dir="rtl">/);
+      assert.doesNotMatch(html, /<script/i, 'CSP script-src self: no inline script');
+    }
+    const privacy = await (await fetch(`${app.base}/privacy.html`)).text();
+    assert.match(privacy, /drive\.file/, 'names the only Drive scope requested');
+    assert.match(privacy, /api-services-user-data-policy/, 'Google limited-use disclosure');
+  } finally {
+    await app.close();
+  }
+});

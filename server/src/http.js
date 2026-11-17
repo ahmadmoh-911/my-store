@@ -494,7 +494,8 @@ function getMimeType(ext) {
 const ALLOWED_DIRS = Object.freeze(['css', 'fonts', 'icons', 'js', 'vendor', 'admin']);
 
 /** Exactly these root files are served, by literal name. */
-const ALLOWED_ROOT_FILES = Object.freeze(['index.html', 'manifest.json', 'sw.js']);
+// privacy.html / terms.html: public pages Google's OAuth consent screen links to.
+const ALLOWED_ROOT_FILES = Object.freeze(['index.html', 'manifest.json', 'sw.js', 'privacy.html', 'terms.html']);
 
 /** The only extensions any served file may carry. */
 const ALLOWED_EXTS = Object.freeze([
