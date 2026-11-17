@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>سياسة الخصوصية — Store Hub</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<link rel="icon" type="image/png" href="icons/favicon-32.png">
+<style>
+:root{--bg:#0f0f12;--card:#17171c;--ink:#ecebef;--muted:#a3a1ab;--line:#2a2a31;--accent:#ff2d55}
+@media (prefers-color-scheme: light){:root{--bg:#f6f5f2;--card:#fff;--ink:#1b1a1f;--muted:#5d5a66;--line:#e3e1dc;--accent:#d61f45}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:'Cairo','IBM Plex Sans Arabic',system-ui,sans-serif;line-height:1.85}
+main{max-width:760px;margin:0 auto;padding:32px 16px 64px}
+h1{font-size:1.7rem;margin:0 0 4px}h2{font-size:1.15rem;margin:28px 0 8px;color:var(--accent)}
+.meta{color:var(--muted);font-size:.9rem;margin-bottom:24px}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:4px 20px 16px;margin-top:16px}
+ul{padding-inline-start:20px}li{margin:4px 0}a{color:var(--accent)}
+.en{direction:ltr;text-align:left;color:var(--muted);font-size:.9rem}
+footer{margin-top:32px;color:var(--muted);font-size:.85rem}
+</style>
+</head>
+<body><main>
+<h1>سياسة الخصوصية</h1>
+<div class="meta">Store Hub (متجري) — آخر تحديث: 17 نوفمبر 2026</div>
+<p class="en">Privacy Policy for Store Hub. Shop data stays on your device; the server keeps only what is needed to sign you in and check your licence. Backups go to your own Google Drive.</p>
+
+<section>
+<h2>الفكرة باختصار</h2>
+<p>بيانات محلك (المنتجات، المخزون، المبيعات، الفواتير، الموردين، التقارير) <b>محفوظة على جهازك أنت</b> داخل المتصفح أو التطبيق، ولا تُرسل لخوادمنا. الخادم يحفظ فقط ما يلزم لتسجيل دخولك والتحقق من ترخيصك.</p>
+</section>
+
+<section>
+<h2>ماذا يحفظ الخادم</h2>
+<ul>
+<li><b>حساب Google:</b> المعرّف الثابت للحساب، البريد الإلكتروني، الاسم، ورابط الصورة الشخصية — حتى نعرف من سجّل الدخول ونربطه بترخيصه.</li>
+<li><b>جلسات الدخول:</b> رمز جلسة مشفّر، وقت الإنشاء والانتهاء، ونوع المتصفح. الجلسات المنتهية تُحذف تلقائياً.</li>
+<li><b>الترخيص:</b> حالة الترخيص، تاريخ التفعيل والانتهاء، والأجهزة المفعّلة عليه (معرّف تثبيت عشوائي، المنصة، رقم إصدار التطبيق، آخر تحقق). رمز التفعيل نفسه لا يُحفظ كنص، بل بصمة مشفّرة منه فقط.</li>
+<li><b>ربط Google Drive (اختياري):</b> إذا ربطت Drive نحفظ رمز تحديث مشفّراً بـ AES-256-GCM حتى نستطيع رفع النسخة الاحتياطية تلقائياً.</li>
+<li><b>طلبات المساعدة والتفعيل (إن أرسلتها):</b> اسم المحل، اسمك، وسيلة التواصل التي كتبتها، ووصف الطلب.</li>
+</ul>
+</section>
+
+<section>
+<h2>Google Drive والنسخ الاحتياطي</h2>
+<p>نطلب صلاحية <code>drive.file</code> فقط: تسمح للتطبيق بالوصول إلى الملفات التي ينشئها هو بنفسه، ولا تسمح برؤية أي ملف آخر في حسابك. النسخة الاحتياطية تُحفظ في Drive الخاص بك، ولا تمر محتوياتها بخوادمنا.</p>
+<p>استخدام التطبيق للمعلومات التي يتلقاها من واجهات Google يلتزم بـ <a href="https://developers.google.com/terms/api-services-user-data-policy" rel="noopener">سياسة بيانات المستخدم لخدمات Google API</a>، بما فيها متطلبات الاستخدام المحدود.</p>
+</section>
+
+<section>
+<h2>ماذا لا نفعل</h2>
+<ul>
+<li>لا نبيع بياناتك ولا نشاركها مع معلنين.</li>
+<li>لا نقرأ بيانات محلك ولا نستخدمها لأي غرض آخر.</li>
+<li>لا نستخدم ملفات تتبع إعلانية.</li>
+</ul>
+</section>
+
+<section>
+<h2>أين تُحفظ البيانات</h2>
+<p>الخادم مستضاف على Render، وقاعدة بيانات الترخيص على Supabase (منطقة أوروبا — فرانكفورت). الاتصال مشفّر عبر HTTPS.</p>
+</section>
+
+<section>
+<h2>حقوقك</h2>
+<ul>
+<li>تستطيع إلغاء ربط Google Drive من إعدادات التطبيق، أو من <a href="https://myaccount.google.com/permissions" rel="noopener">صلاحيات حساب Google</a>.</li>
+<li>تستطيع طلب نسخة من بياناتك المحفوظة على الخادم أو حذفها بمراسلتنا. حذف بيانات الحساب يوقف الترخيص المرتبط به.</li>
+<li>بيانات المحل على جهازك تحذفها أنت متى شئت بمسح بيانات التطبيق، فاحرص على نسخة احتياطية قبل ذلك.</li>
+</ul>
+</section>
+
+<section>
+<h2>التواصل</h2>
+<p>لأي سؤال عن الخصوصية: <a href="mailto:masriahmad212223@gmail.com">masriahmad212223@gmail.com</a></p>
+</section>
+
+<footer><a href="terms.html">شروط الاستخدام</a> · <a href="./">العودة للتطبيق</a></footer>
+</main></body></html>

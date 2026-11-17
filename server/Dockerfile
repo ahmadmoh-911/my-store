@@ -16,7 +16,7 @@ COPY server/src ./src
 COPY server/supabase ./supabase
 
 # Copy web assets served by the backend (app shell + admin portal)
-COPY index.html manifest.json sw.js ./
+COPY index.html manifest.json sw.js privacy.html terms.html ./
 COPY css ./css
 COPY fonts ./fonts
 COPY icons ./icons
